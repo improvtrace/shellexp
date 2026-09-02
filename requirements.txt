@@ -1,0 +1,15 @@
+# ShellExp 运行时依赖（系统包，非 pip 包）
+# expect 是 Tcl 解释器的扩展，二者均来自操作系统软件源。
+#
+# 安装命令：
+#   Debian / Ubuntu:              sudo apt-get install -y expect tcl
+#   RHEL / CentOS / Rocky / Alma: sudo yum install -y expect tcl
+#   openSUSE / SLES:              sudo zypper install -y expect tcl
+#
+# 最低版本说明：
+#   expect >= 5.45  spawn/expect/send/exp_continue/log_user（5.45 为主流发行版基线，
+#                   注意 5.45 gate keeper 优化对 (?i) 正则的影响，模板已用字符类规避）
+#   tcl    >= 8.6   expect 的底层解释器
+
+expect >= 5.45
+tcl >= 8.6

@@ -1,0 +1,219 @@
+#!/usr/bin/expect
+# ============================================================
+# ShellExp 生成的 expect 脚本 —— 构建产物, 请勿手工编辑
+# 组合: auth=generic escalate=su biz=chpasswd
+# 重新生成: ./main.sh --auth generic --escalate su --biz chpasswd --out bin/generic_su_chpasswd.exp
+# 生成时间: 2026-09-02 19:18:45
+# ============================================================
+
+
+# ------------------------------------------------------------
+# 段0 公共头 · 超时（可用环境变量 TIMEOUT 覆盖, 默认 30 秒）
+# ------------------------------------------------------------
+set timeout 30
+if {[info exists env(TIMEOUT)]} { set timeout $env(TIMEOUT) }
+
+proc usage {} {
+    global argv0
+    puts stderr "用法: AUTH_PASS=... ESCALATE_PASS=... NEW_PASS=... $argv0 <host> <port> <auth_user> <escalate_user> <target_user>"
+    puts stderr ""
+    puts stderr "位置参数:"
+    puts stderr "  host         目标主机地址"
+    puts stderr "  port         SSH端口"
+    puts stderr "  auth_user    SSH登录用户名"
+    puts stderr "  escalate_user su切换的目标用户"
+    puts stderr "  target_user  改密目标用户名"
+
+    puts stderr ""
+    puts stderr "环境变量:"
+    puts stderr "  AUTH_PASS        SSH 登录密码（必填）"
+    puts stderr "  ESCALATE_PASS    提权密码（必填; su 输目标身份密码, sudo 输当前用户密码）"
+    puts stderr "  NEW_PASS         新密码（必填）"
+    puts stderr "  TIMEOUT          expect 超时秒数（可选, 默认 30）"
+
+    exit 1
+}
+
+# 运行时校验: 缺少必需环境变量立即报错退出（凭据不进 argv, 防 ps 泄露）
+foreach _v {AUTH_PASS ESCALATE_PASS NEW_PASS} {
+    if {![info exists env($_v)]} {
+        puts stderr "ERROR: 缺少必需的环境变量 $_v"
+        usage
+    }
+}
+
+if {$argc != 5} { usage }
+set host [lindex $argv 0]
+set port [lindex $argv 1]
+set auth_user [lindex $argv 2]
+set escalate_user [lindex $argv 3]
+set target_user [lindex $argv 4]
+
+
+
+# ------------------------------------------------------------
+# 公共工具函数（源: script/lib/util.tcl, 拼装时内联）
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+# script/lib/util.tcl — 公共工具函数（拼装时内联进 bin/ 产物）
+# ------------------------------------------------------------
+
+# 带时间戳的日志，输出到 stderr（不污染 stdout，便于管道采集）
+proc log_info {msg} {
+    puts stderr "\[[clock format [clock seconds] -format %H:%M:%S]\] $msg"
+}
+
+# 报错退出：code 为分段语义退出码
+proc die {code msg} {
+    puts stderr "ERROR: $msg"
+    exit $code
+}
+
+# POSIX 单引号转义：把值安全嵌入远端 shell 的单引号字符串
+# 例：ab'cd -> ab'\''cd（拼回单引号串后还原为 ab'cd）
+# 注意：映射表必须用 [list] 构造，大括号字面量会被 lindex 吃掉反斜杠
+proc quote_single {s} {
+    return [string map [list "'" "'\\''"] $s]
+}
+
+# ------------------------------------------------------------
+# 段1 认证 · generic —— SSH 密码登录（全脚本唯一 spawn 点）
+# REQUIRE_ENV: AUTH_PASS
+# REQUIRE_ARGV: host 目标主机地址
+# REQUIRE_ARGV: port SSH端口
+# REQUIRE_ARGV: auth_user SSH登录用户名
+# 前置: 无
+# 后置: 已到达远端 shell 提示符，远端 locale 已固定为 C
+# 退出码: 2 认证失败 / 连接不可达 / 超时 / 会话中断
+# ------------------------------------------------------------
+# 模式说明（调研 11.4 实测坑位）：
+#   - 用 [Pp] 字符类而非 (?i)，规避 Expect gate keeper 优化导致大写 P 永不匹配
+#   - 提示符/密码提示均锚定行尾 \s*$，避免误匹配命令回显
+
+if {![info exists env(AUTH_PASS)]} { die 1 "missing env AUTH_PASS" }
+
+log_info "spawn ssh -p $port -o ConnectTimeout=10 $auth_user@$host"
+spawn ssh -p $port -o ConnectTimeout=10 $auth_user@$host
+
+set _auth_tries 0
+expect {
+    -re {[Pp]ermission [Dd]enied|Host key verification failed} {
+        puts stderr "AUTH_DENIED"
+        exit 2
+    }
+    -re {Connection (refused|timed out|reset|closed)|No route to host|Network is unreachable} {
+        puts stderr "AUTH_UNREACHABLE"
+        exit 2
+    }
+    -re {yes/no} {
+        send "yes\r"
+        exp_continue
+    }
+    -re {[Pp]assword\s*[:：]\s*$} {
+        # 单次失败即退出，防止连续错密触发账号锁定（调研 6.1 场景 E）
+        if {[incr _auth_tries] > 1} { puts stderr "AUTH_DENIED"; exit 2 }
+        log_info "password prompt hit, sending AUTH_PASS"
+        log_user 0
+        send -- "$env(AUTH_PASS)\r"
+        exp_continue
+    }
+    -re {[%#$>]\s*$} {
+        log_user 1
+        log_info "auth ok, remote prompt reached"
+    }
+    timeout { puts stderr "AUTH_TIMEOUT"; exit 2 }
+    eof     { puts stderr "AUTH_EOF";     exit 2 }
+}
+
+# 固定远端 locale，规避中文提示漂移（调研 4.4）
+send "export LANG=C LC_ALL=C\r"
+expect {
+    -re {[%#$>]\s*$} { }
+    timeout { puts stderr "LOCALE_TIMEOUT"; exit 2 }
+    eof     { puts stderr "AUTH_EOF";       exit 2 }
+}
+
+# ------------------------------------------------------------
+# 段2 提权 · su —— su - 切换目标身份（输入的是目标身份的密码）
+# REQUIRE_ENV: ESCALATE_PASS
+# REQUIRE_ARGV: escalate_user su切换的目标用户
+# 前置: 已到达远端 shell 提示符（认证段完成）
+# 退出码: 7 提权失败 / 超时 / 会话中断
+# 注意: root 登录时 su 到普通用户无需密码，直接命中提示符分支
+# ------------------------------------------------------------
+
+if {![info exists env(ESCALATE_PASS)]} { die 1 "missing env ESCALATE_PASS" }
+
+log_info "escalate: su - $escalate_user"
+send "su - $escalate_user\r"
+
+set _su_tries 0
+expect {
+    -re {su: [Aa]uthentication [Ff]ailure|su: [Ss]orry|[Ii]ncorrect [Pp]assword|认证失败|Unknown id|does not exist|no passwd entry} {
+        puts stderr "ESCALATE_DENIED"
+        exit 7
+    }
+    -re {[Pp]assword\s*[:：]\s*$} {
+        if {[incr _su_tries] > 1} { puts stderr "ESCALATE_DENIED"; exit 7 }
+        log_info "su password prompt hit"
+        log_user 0
+        send -- "$env(ESCALATE_PASS)\r"
+        exp_continue
+    }
+    -re {[%#$>]\s*$} {
+        log_user 1
+        log_info "escalated to $escalate_user via su"
+    }
+    timeout { puts stderr "ESCALATE_TIMEOUT"; exit 7 }
+    eof     { puts stderr "ESCALATE_EOF";     exit 7 }
+}
+
+# ------------------------------------------------------------
+# 段3 业务 · password/chpasswd —— 非交互改密（首选路线，调研 6.1 路线 A）
+# REQUIRE_ENV: NEW_PASS
+# REQUIRE_ARGV: target_user 改密目标用户名
+# 前置: 会话已具备 root 权限（直登 root 或经提权段）
+# 判定: 以退出码标记 BIZRC_<ts>=rc 判定成败，规避回显/语言/发行版差异（调研 3.3）
+# 退出码: 6 业务失败
+# ------------------------------------------------------------
+
+if {![info exists env(NEW_PASS)]} { die 1 "missing env NEW_PASS" }
+
+set _tu [quote_single $target_user]
+set _np [quote_single $env(NEW_PASS)]
+set _marker "BIZRC_[clock clicks]"
+
+log_info "biz: chpasswd for $target_user"
+# 命令行内嵌密码：先关回显再 send，防止密码进入屏幕/会话日志（调研 6.5）
+log_user 0
+send "echo '$_tu:$_np' | chpasswd; echo $_marker=\$?\r"
+
+expect {
+    -re "$_marker=(\[0-9\]+)" {
+        log_user 1
+        set _rc $expect_out(1,string)
+        if {$_rc == 0} {
+            log_info "biz: password changed for $target_user (rc=0)"
+        } else {
+            puts stderr "BIZ_FAIL: chpasswd rc=$_rc"
+            exit 6
+        }
+    }
+    timeout { log_user 1; puts stderr "BIZ_TIMEOUT"; exit 6 }
+    eof     { log_user 1; puts stderr "BIZ_EOF";     exit 6 }
+}
+
+
+# ------------------------------------------------------------
+# 段4 收尾 · epilogue —— 逐层退出嵌套 shell 直至 eof
+# ------------------------------------------------------------
+log_info "epilogue: exiting session"
+foreach _i {1 2 3 4 5} {
+    expect {
+        eof     { break }
+        -re {[%#$>]\s*$} { send "exit\r" }
+        timeout { break }
+    }
+}
+catch { wait }
+exit 0

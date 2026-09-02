@@ -1,0 +1,84 @@
+#!/usr/bin/expect
+
+# exp_internal 1   ;# 打开调试匹配日志
+
+if {$argc != 4} {
+    puts stderr "Usage: $argv0 host user login_password new_password"
+    puts stderr "Example: $argv0 <host> root \"<login_password>\" \"<new_password>\""
+    exit 1
+}
+
+set host         [lindex $argv 0]
+set login_user   [lindex $argv 1]
+set login_pass   [lindex $argv 2]
+set new_pass     [lindex $argv 3]
+set timeout 10
+
+set t0 [clock milliseconds]
+spawn ssh $login_user@$host
+
+set t1 [clock milliseconds]
+puts stderr "\n[format "%.3f" [expr {($t1 - $t0)/1000.0}]]s : spawn ssh完成，等待密码/指纹"
+
+expect {
+    "password:" {
+        send "$login_pass\r"
+    }
+    "Are you sure you want to continue connecting" {
+        send "yes\r"
+        exp_continue
+    }
+    timeout {
+        puts stderr "ERROR: ssh connect timeout"
+        exit 1
+    }
+}
+
+set t2 [clock milliseconds]
+puts stderr "[format "%.3f" [expr {([clock milliseconds] - $t2)/1000.0}]]s : 密码交互完成，等待登录提示符"
+
+expect -re {\[.*\]#}
+set t3 [clock milliseconds]
+puts stderr "[format "%.3f" [expr {($t3 - $t2)/1000.0}]]s : 获取root shell提示符成功"
+
+puts stderr "==== 执行 passwd utest 修改用户密码 ===="
+send "passwd utest\r"
+
+# passwd 提示兼容中英文：
+# 中文：新的 密码：
+# 英文：New password:
+expect {
+    -re {New password:|新的 *密码：} {
+        send "$new_pass\r"
+    }
+    timeout {
+        puts stderr "ERROR: wait first password prompt timeout"
+        exit 1
+    }
+}
+
+# 再次确认密码：英文 Retype new password:；中文 重新输入新的 密码：
+expect {
+    -re {Retype new password:|重新输入新的 *密码：} {
+        send "$new_pass\r"
+    }
+    timeout {
+        puts stderr "ERROR: wait confirm password prompt timeout"
+        exit 1
+    }
+}
+
+# 等待命令结束回到shell提示符
+expect -re {\[.*\]#}
+set t4 [clock milliseconds]
+puts stderr "[format "%.3f" [expr {($t4 - $t3)/1000.0}]]s : utest改密执行完成，返回shell"
+
+puts stderr "==== 执行exit退出ssh ===="
+send "exit\r"
+expect eof
+
+set t5 [clock milliseconds]
+puts stderr "[format "%.3f" [expr {($t5 - $t4)/1000.0}]]s : ssh会话eof关闭"
+
+set total [format "%.3f" [expr {($t5 - $t0)/1000.0}]]
+puts stderr "\n==== Total elapsed: ${total}s ====\n"
