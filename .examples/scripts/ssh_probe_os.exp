@@ -1,0 +1,91 @@
+#!/usr/bin/expect -f
+# 探测远程主机操作系统类型
+# 用法: ./ssh_probe_os.exp <host> <user> <password>
+
+set timeout 15
+set host [lindex $argv 0]
+set user [lindex $argv 1]
+set pass [lindex $argv 2]
+
+if { $host == "" || $user == "" || $pass == "" } {
+    puts "Usage: ./ssh_probe_os.exp <host> <user> <password>"
+    exit 1
+}
+
+log_user 1
+spawn ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 $user@$host
+
+expect {
+    timeout {
+        puts "Connection timeout."
+        exit 1
+    }
+    "yes/no" {
+        send "yes\r"
+        exp_continue
+    }
+    "password:" {
+        send "$pass\r"
+    }
+}
+
+# 等待登录成功后的提示符
+expect {
+    timeout {
+        puts "Login failed or prompt not recognized."
+        exit 1
+    }
+    -re "(%|\\$|#|> )" {
+        send "uname -s\r"
+    }
+}
+
+# 读取 uname 输出
+expect {
+    timeout {
+        puts "No response from uname."
+        exit 1
+    }
+    -re "uname -s\r\n(.*)\r\n.*(%|\\$|#|> )" {
+        set os [string trim $expect_out(1,string)]
+        puts "Detected OS (uname): $os"
+        switch -glob -- $os {
+            "Linux" {
+                send "cat /etc/os-release 2>/dev/null | grep -E '^NAME=' | cut -d= -f2 | tr -d '\"'\r"
+                expect {
+                    # 修正：匹配命令回显后的输出行
+                    -re "cat .*\r\n(.*)\r\n.*(%|\\$|#|> )" {
+                        set distro [string trim $expect_out(1,string)]
+                        if { $distro != "" } {
+                            puts "Linux distribution: $distro"
+                        } else {
+                            puts "Linux distribution: (not found)"
+                        }
+                    }
+                }
+            }
+            "SunOS" { puts "OS: SunOS (Solaris)" }
+            "AIX"   { puts "OS: IBM AIX" }
+            "Darwin" { puts "OS: macOS / Darwin" }
+            "CYGWIN" { puts "OS: Cygwin on Windows" }
+            default { puts "Unknown OS: $os" }
+        }
+        send "exit\r"
+        expect eof
+        exit 0
+    }
+}
+
+# 备用探测（如果 uname 失败）
+send "cat /etc/issue 2>/dev/null | head -1\r"
+expect {
+    -re "cat .*\r\n(.*)\r\n.*(%|\\$|#|> )" {
+        set issue [string trim $expect_out(1,string)]
+        if { $issue != "" } {
+            puts "Fallback detection from /etc/issue: $issue"
+        }
+    }
+}
+send "exit\r"
+expect eof
+exit 0

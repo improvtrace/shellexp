@@ -1,11 +1,11 @@
 # ------------------------------------------------------------
-# 段1 认证 · generic —— SSH 密码登录（全脚本唯一 spawn 点）
+# 段1 认证 · ssh —— SSH 密码登录（全脚本唯一 spawn 点）
 # REQUIRE_ENV: AUTH_PASS
-# REQUIRE_ARGV: host 目标主机地址
-# REQUIRE_ARGV: port SSH端口
-# REQUIRE_ARGV: auth_user SSH登录用户名
+# REQUIRE_ARGV: host target host address
+# REQUIRE_ARGV: port SSH port (e.g. 22)
+# REQUIRE_ARGV: auth_user SSH login username
 # 前置: 无
-# 后置: 已到达远端 shell 提示符，远端 locale 已固定为 C
+# 后置: 已到达远端 shell 提示符（locale 固定由公共帧完成，见 main.sh 段1.5）
 # 退出码: 2 认证失败 / 连接不可达 / 超时 / 会话中断
 # ------------------------------------------------------------
 # 模式说明（调研 11.4 实测坑位）：
@@ -45,12 +45,4 @@ expect {
     }
     timeout { puts stderr "AUTH_TIMEOUT"; exit 2 }
     eof     { puts stderr "AUTH_EOF";     exit 2 }
-}
-
-# 固定远端 locale，规避中文提示漂移（调研 4.4）
-send "export LANG=C LC_ALL=C\r"
-expect {
-    -re {[%#$>]\s*$} { }
-    timeout { puts stderr "LOCALE_TIMEOUT"; exit 2 }
-    eof     { puts stderr "AUTH_EOF";       exit 2 }
 }

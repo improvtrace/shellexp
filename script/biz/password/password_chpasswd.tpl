@@ -1,7 +1,7 @@
 # ------------------------------------------------------------
 # 段3 业务 · password/chpasswd —— 非交互改密（首选路线，调研 6.1 路线 A）
 # REQUIRE_ENV: NEW_PASS
-# REQUIRE_ARGV: target_user 改密目标用户名
+# REQUIRE_ARGV: target_user user whose password to change
 # 前置: 会话已具备 root 权限（直登 root 或经提权段）
 # 判定: 以退出码标记 BIZRC_<ts>=rc 判定成败，规避回显/语言/发行版差异（调研 3.3）
 # 退出码: 6 业务失败

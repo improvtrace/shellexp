@@ -1,0 +1,228 @@
+#!/usr/bin/expect
+# ============================================================
+# ShellExp 生成的 expect 脚本 —— 构建产物, 请勿手工编辑
+# 组合: auth=telnet escalate=sudo biz=discover_os
+# 重新生成: ./main.sh --auth telnet --escalate sudo --biz discover_os --out bin/telnet_sudo_discover_os.exp
+# 生成时间: 2026-09-02 19:33:05
+# ============================================================
+
+
+# ------------------------------------------------------------
+# 段0 公共头 · 超时（可用环境变量 TIMEOUT 覆盖, 默认 30 秒）
+# ------------------------------------------------------------
+set timeout 30
+if {[info exists env(TIMEOUT)]} { set timeout $env(TIMEOUT) }
+
+proc usage {} {
+    global argv0
+    puts stderr "Usage: AUTH_PASS=... ESCALATE_PASS=... $argv0 <host> <port> <auth_user>"
+    puts stderr ""
+    puts stderr "Positional args:"
+    puts stderr "  host         target host address"
+    puts stderr "  port         telnet port (e.g. 23)"
+    puts stderr "  auth_user    login username"
+
+    puts stderr ""
+    puts stderr "Environment variables:"
+    puts stderr "  AUTH_PASS        SSH/telnet login password (required)"
+    puts stderr "  ESCALATE_PASS    privilege escalation password (required; su: target user's password, sudo: current user's password)"
+    puts stderr "  TIMEOUT          expect timeout in seconds (optional, default 30)"
+
+    exit 1
+}
+
+# 运行时校验: 缺少必需环境变量立即报错退出（凭据不进 argv, 防 ps 泄露）
+foreach _v {AUTH_PASS ESCALATE_PASS} {
+    if {![info exists env($_v)]} {
+        puts stderr "ERROR: missing required env var $_v"
+        usage
+    }
+}
+
+if {$argc != 3} { usage }
+set host [lindex $argv 0]
+set port [lindex $argv 1]
+set auth_user [lindex $argv 2]
+
+
+
+# ------------------------------------------------------------
+# 公共工具函数（源: script/lib/util.tcl, 拼装时内联）
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+# script/lib/util.tcl — 公共工具函数（拼装时内联进 bin/ 产物）
+# ------------------------------------------------------------
+
+# 带时间戳的日志，输出到 stderr（不污染 stdout，便于管道采集）
+proc log_info {msg} {
+    puts stderr "\[[clock format [clock seconds] -format %H:%M:%S]\] $msg"
+}
+
+# 报错退出：code 为分段语义退出码
+proc die {code msg} {
+    puts stderr "ERROR: $msg"
+    exit $code
+}
+
+# POSIX 单引号转义：把值安全嵌入远端 shell 的单引号字符串
+# 例：ab'cd -> ab'\''cd（拼回单引号串后还原为 ab'cd）
+# 注意：映射表必须用 [list] 构造，大括号字面量会被 lindex 吃掉反斜杠
+proc quote_single {s} {
+    return [string map [list "'" "'\\''"] $s]
+}
+
+# ------------------------------------------------------------
+# 段1 认证 · telnet —— Telnet 密码登录（全脚本唯一 spawn 点）
+# REQUIRE_ENV: AUTH_PASS
+# REQUIRE_ARGV: host target host address
+# REQUIRE_ARGV: port telnet port (e.g. 23)
+# REQUIRE_ARGV: auth_user login username
+# 前置: 无
+# 后置: 已到达远端 shell 提示符（locale 固定由公共帧完成，见 main.sh 段1.5）
+# 退出码: 2 认证失败 / 连接不可达 / 超时 / 会话中断
+# 安全警告: Telnet 明文传输凭据，仅限独立管理网/带外网使用（调研 5.4）
+# ------------------------------------------------------------
+
+if {![info exists env(AUTH_PASS)]} { die 1 "missing env AUTH_PASS" }
+
+log_info "spawn telnet $host $port"
+spawn telnet $host $port
+
+set _login_tries 0
+set _pass_tries 0
+expect {
+    -re {Connection refused|Unable to connect|No route to host|Network is unreachable|Connection timed out|Connection closed by foreign host} {
+        puts stderr "AUTH_UNREACHABLE"
+        exit 2
+    }
+    -re {(Login|Username|login)\s*[:：]\s*$} {
+        # 登录名提示反复出现视为认证失败（单次失败即退出，防锁定）
+        if {[incr _login_tries] > 1} { puts stderr "AUTH_DENIED"; exit 2 }
+        log_info "login prompt hit, sending auth_user"
+        send -- "$auth_user\r"
+        exp_continue
+    }
+    -re {[Pp]assword\s*[:：]\s*$} {
+        if {[incr _pass_tries] > 1} { puts stderr "AUTH_DENIED"; exit 2 }
+        log_info "password prompt hit, sending AUTH_PASS"
+        log_user 0
+        send -- "$env(AUTH_PASS)\r"
+        exp_continue
+    }
+    -re {Login incorrect|认证失败} {
+        puts stderr "AUTH_DENIED"
+        exit 2
+    }
+    -re {[%#$>]\s*$} {
+        log_user 1
+        log_info "auth ok, remote prompt reached"
+    }
+    timeout { puts stderr "AUTH_TIMEOUT"; exit 2 }
+    eof     { puts stderr "AUTH_EOF";     exit 2 }
+}
+
+# ------------------------------------------------------------
+# 段1.5 公共 · locale 固定 —— 认证成功后、提权/业务前执行；
+# 统一远端提示语言，规避中文 locale 下的提示漂移（调研 4.4）。
+# 注意: 要求远端为 POSIX shell；网络设备等非 shell 目标应在业务模板内处理。
+# ------------------------------------------------------------
+send "export LANG=C LC_ALL=C\r"
+expect {
+    -re {[%#$>]\s*$} { }
+    timeout { puts stderr "LOCALE_TIMEOUT"; exit 2 }
+    eof     { puts stderr "LOCALE_EOF";     exit 2 }
+}
+log_info "remote locale fixed to C"
+
+# ------------------------------------------------------------
+# 段2 提权 · sudo —— sudo -S -i 提权为 root（输入的是当前登录用户的密码）
+# REQUIRE_ENV: ESCALATE_PASS
+# 前置: 已到达远端 shell 提示符（认证段完成）
+# 退出码: 7 提权失败 / 超时 / 会话中断
+# 注意: NOPASSWD 白名单场景无密码提示，直接命中提示符分支
+# ------------------------------------------------------------
+
+if {![info exists env(ESCALATE_PASS)]} { die 1 "missing env ESCALATE_PASS" }
+
+log_info "escalate: sudo -S -i"
+send "sudo -S -i\r"
+
+set _sudo_tries 0
+expect {
+    -re {not in the sudoers|sudo: 1 incorrect|[Ss]orry, try again|认证失败} {
+        puts stderr "ESCALATE_DENIED"
+        exit 7
+    }
+    -re {\[sudo\]\s*[Pp]assword|[Pp]assword\s*[:：]\s*$} {
+        if {[incr _sudo_tries] > 1} { puts stderr "ESCALATE_DENIED"; exit 7 }
+        log_info "sudo password prompt hit"
+        log_user 0
+        send -- "$env(ESCALATE_PASS)\r"
+        exp_continue
+    }
+    -re {[%#$>]\s*$} {
+        log_user 1
+        log_info "escalated to root via sudo"
+    }
+    timeout { puts stderr "ESCALATE_TIMEOUT"; exit 7 }
+    eof     { puts stderr "ESCALATE_EOF";     exit 7 }
+}
+
+# ------------------------------------------------------------
+# 段3 业务 · discover_os —— 探测远端资产类型（OS 家族/内核/发行版/改密能力）
+# 前置: 已到达远端 POSIX shell 提示符（认证/提权段完成）
+# 输出: stdout 单行结构化结果
+#       DISCOVER os=<os> kernel=<ver> id=<distro> chpasswd=<yes|no>
+# 说明: 全部探测只读；id 依赖 /etc/os-release，AIX/Solaris 等无该文件则为 "-"
+# 退出码: 6 业务失败
+# ------------------------------------------------------------
+
+log_info "biz: discovering remote asset type"
+# 注意: Tcl 正则默认非 multiline, `^` 只锚定缓冲区开头; 用 `\r?\n` 前缀锚定规避
+# 命令回显误判（调研 3.3）。行尾用后瞻 (?=\r?\n) 而非直接消费换行符,
+# 否则上一模式吃掉换行后, 下一行失去前导锚点（exp_continue 连续匹配场景）。
+send "echo DISC_BEGIN; uname -s; uname -r; awk -F= '/^ID=/{print \"ID=\" \$2; exit}' /etc/os-release 2>/dev/null; command -v chpasswd >/dev/null 2>&1 && echo HAS_CHPASSWD=1 || echo HAS_CHPASSWD=0; echo DISC_END\r"
+
+set _os "-"
+set _kernel "-"
+set _id "-"
+set _chpwd "-"
+expect {
+    -re {\r?\n(Linux|AIX|SunOS|FreeBSD|OpenBSD|NetBSD|Darwin|HP-UX)(?=\r?\n)} {
+        set _os $expect_out(1,string)
+        exp_continue
+    }
+    -re {\r?\n([0-9][^\r\n]*)(?=\r?\n)} {
+        set _kernel $expect_out(1,string)
+        exp_continue
+    }
+    -re {\r?\nID=([^\r\n]*)(?=\r?\n)} {
+        if {[string length $expect_out(1,string)] > 0} { set _id $expect_out(1,string) }
+        exp_continue
+    }
+    -re {\r?\nHAS_CHPASSWD=([01])(?=\r?\n)} {
+        set _chpwd [expr {$expect_out(1,string) eq "1" ? "yes" : "no"}]
+        exp_continue
+    }
+    -re {\r?\nDISC_END(?=\r?\n)} { }
+    timeout { puts stderr "BIZ_TIMEOUT"; exit 6 }
+    eof     { puts stderr "BIZ_EOF";     exit 6 }
+}
+
+puts "DISCOVER os=$_os kernel=$_kernel id=$_id chpasswd=$_chpwd"
+log_info "biz: discover done: os=$_os kernel=$_kernel id=$_id chpasswd=$_chpwd"
+
+
+# ------------------------------------------------------------
+# 段4 收尾 · epilogue —— 逐层退出嵌套 shell 直至 eof
+# ------------------------------------------------------------
+log_info "epilogue: exiting session"
+foreach _i {1 2 3 4 5} {
+    expect {
+        eof     { break }
+        -re {[%#$>]\s*$} { send "exit\r" }
+        timeout { break }
+    }
+}
+catch { wait }
+exit 0

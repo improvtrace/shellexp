@@ -1,7 +1,7 @@
 # ------------------------------------------------------------
 # 段2 提权 · su —— su - 切换目标身份（输入的是目标身份的密码）
 # REQUIRE_ENV: ESCALATE_PASS
-# REQUIRE_ARGV: escalate_user su切换的目标用户
+# REQUIRE_ARGV: escalate_user target user to su into
 # 前置: 已到达远端 shell 提示符（认证段完成）
 # 退出码: 7 提权失败 / 超时 / 会话中断
 # 注意: root 登录时 su 到普通用户无需密码，直接命中提示符分支

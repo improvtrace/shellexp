@@ -18,34 +18,35 @@ die() { echo "main.sh: $1" >&2; exit "${2:-64}"; }
 
 show_usage() {
     cat <<'USAGE'
-用法:
+Usage:
   ./main.sh --auth <name> --escalate <name> --biz <name> --out <file>
-      --auth <name>      认证段: script/biz/auth/<name>.tpl
-      --escalate <name>  提权段: script/biz/escalate/<name>.tpl (none/su/sudo)
-      --biz <name>       业务段: script/biz/ 业务子目录中唯一匹配的 <name>.tpl
-      --out <file>       输出路径 (惯例 bin/<auth>_<escalate>_<biz>.exp)
+      --auth <name>      auth segment:     script/biz/auth/auth_<name>.tpl (ssh/telnet)
+      --escalate <name>  escalate segment: script/biz/escalate/escalate_<name>.tpl (none/su/sudo)
+      --biz <name>       biz segment:      unique <name>.tpl under script/biz/ category dirs
+      --out <file>       output path (conventionally under bin/)
 
-  ./main.sh --list       列出可用段模板
-  ./main.sh --help       显示本帮助
+  ./main.sh --list       list available segment templates
+  ./main.sh --help       show this help
 
-示例:
-  ./main.sh --auth generic --escalate sudo --biz chpasswd --out bin/generic_sudo_chpasswd.exp
-  AUTH_PASS='登录密码' ESCALATE_PASS='sudo密码' NEW_PASS='新密码' \
-      ./bin/generic_sudo_chpasswd.exp <host> <port> <auth_user> <target_user>
+Example:
+  ./main.sh --auth ssh --escalate sudo --biz chpasswd --out bin/ssh_sudo_chpasswd.exp
+  AUTH_PASS='loginpass' ESCALATE_PASS='sudopass' NEW_PASS='newpass' \
+      ./bin/ssh_sudo_chpasswd.exp <host> <port> <auth_user> <target_user>
 USAGE
 }
 
 list_templates() {
-    echo "可用段模板 (script/biz/):"
+    echo "Available segment templates (script/biz/):"
     local dir base names
     for dir in "$BIZ_ROOT"/*/; do
         base="$(basename "$dir")"
-        names="$(cd "$dir" && ls -1 *.tpl 2>/dev/null | sed 's/\.tpl$//' | paste -sd ' ' -)"
-        printf '  %-10s %s\n' "$base" "${names:-(空)}"
+        names="$(cd "$dir" && ls -1 *.tpl 2>/dev/null | sed 's/\.tpl$//' \
+            | sed 's/^auth_//;s/^escalate_//;s/^password_//' | paste -sd ' ' -)"
+        printf '  %-10s %s\n' "$base" "${names:-(empty)}"
     done
     echo
-    echo "说明: --auth 取 auth/ 下文件名; --escalate 取 escalate/ 下文件名;"
-    echo "      --biz 在业务子目录(auth/escalate 除外)中按文件名唯一匹配。"
+    echo "Note: --auth <n> -> auth/auth_<n>.tpl; --escalate <n> -> escalate/escalate_<n>.tpl;"
+    echo "      --biz <n> -> <n>.tpl or <category>_<n>.tpl under biz category dirs (auth/escalate excluded)."
 }
 
 # ----------------------------------------------------------------
@@ -55,37 +56,38 @@ AUTH="" ESCALATE="" BIZ="" OUT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --auth)     [[ $# -ge 2 ]] || die "选项 $1 缺少参数"; AUTH="$2"; shift 2 ;;
-        --escalate) [[ $# -ge 2 ]] || die "选项 $1 缺少参数"; ESCALATE="$2"; shift 2 ;;
-        --biz)      [[ $# -ge 2 ]] || die "选项 $1 缺少参数"; BIZ="$2"; shift 2 ;;
-        --out)      [[ $# -ge 2 ]] || die "选项 $1 缺少参数"; OUT="$2"; shift 2 ;;
+        --auth)     [[ $# -ge 2 ]] || die "option $1 requires a value"; AUTH="$2"; shift 2 ;;
+        --escalate) [[ $# -ge 2 ]] || die "option $1 requires a value"; ESCALATE="$2"; shift 2 ;;
+        --biz)      [[ $# -ge 2 ]] || die "option $1 requires a value"; BIZ="$2"; shift 2 ;;
+        --out)      [[ $# -ge 2 ]] || die "option $1 requires a value"; OUT="$2"; shift 2 ;;
         --list)     list_templates; exit 0 ;;
         -h|--help)  show_usage; exit 0 ;;
-        *)          echo "main.sh: 未知选项: $1" >&2; show_usage; exit 64 ;;
+        *)          echo "main.sh: unknown option: $1" >&2; show_usage; exit 64 ;;
     esac
 done
 
-[[ -n "$AUTH"     ]] || die "缺少 --auth" 64
-[[ -n "$ESCALATE" ]] || die "缺少 --escalate" 64
-[[ -n "$BIZ"      ]] || die "缺少 --biz" 64
-[[ -n "$OUT"      ]] || die "缺少 --out" 64
+[[ -n "$AUTH"     ]] || die "missing --auth" 64
+[[ -n "$ESCALATE" ]] || die "missing --escalate" 64
+[[ -n "$BIZ"      ]] || die "missing --biz" 64
+[[ -n "$OUT"      ]] || die "missing --out" 64
 
 # ----------------------------------------------------------------
 # 定位段模板
 # ----------------------------------------------------------------
-auth_f="$BIZ_ROOT/auth/$AUTH.tpl"
-esc_f="$BIZ_ROOT/escalate/$ESCALATE.tpl"
+auth_f="$BIZ_ROOT/auth/auth_${AUTH}.tpl"
+esc_f="$BIZ_ROOT/escalate/escalate_${ESCALATE}.tpl"
 
-[[ -f "$auth_f" ]] || die "认证段模板不存在: $auth_f"
-[[ -f "$esc_f" ]] || die "提权段模板不存在: $esc_f"
+[[ -f "$auth_f" ]] || die "auth template not found: $auth_f"
+[[ -f "$esc_f" ]] || die "escalate template not found: $esc_f"
 
-mapfile -t biz_files < <(find "$BIZ_ROOT" -mindepth 2 -maxdepth 2 -type f -name "$BIZ.tpl" \
+mapfile -t biz_files < <(find "$BIZ_ROOT" -mindepth 2 -maxdepth 2 -type f \
+    \( -name "$BIZ.tpl" -o -name "*_${BIZ}.tpl" \) \
     ! -path "$BIZ_ROOT/auth/*" ! -path "$BIZ_ROOT/escalate/*" | sort)
 if (( ${#biz_files[@]} == 0 )); then
-    die "业务段模板不存在: $BIZ.tpl"
+    die "biz template not found: $BIZ.tpl"
 fi
 if (( ${#biz_files[@]} > 1 )); then
-    die "业务段模板名不唯一: $BIZ.tpl -> ${biz_files[*]}"
+    die "ambiguous biz template name: $BIZ.tpl -> ${biz_files[*]}"
 fi
 biz_f="${biz_files[0]}"
 
@@ -137,16 +139,16 @@ for v in $REQ_ENVS; do env_prefix+="${v}=... "; done
 env_descs=()
 for v in $REQ_ENVS; do
     case "$v" in
-        AUTH_PASS)     env_descs+=("AUTH_PASS        SSH 登录密码（必填）") ;;
-        ESCALATE_PASS) env_descs+=("ESCALATE_PASS    提权密码（必填; su 输目标身份密码, sudo 输当前用户密码）") ;;
-        NEW_PASS)      env_descs+=("NEW_PASS         新密码（必填）") ;;
+        AUTH_PASS)     env_descs+=("AUTH_PASS        SSH/telnet login password (required)") ;;
+        ESCALATE_PASS) env_descs+=("ESCALATE_PASS    privilege escalation password (required; su: target user's password, sudo: current user's password)") ;;
+        NEW_PASS)      env_descs+=("NEW_PASS         new password (required)") ;;
         *)             env_descs+=("$v") ;;
     esac
 done
 if [[ "$BIZ" == "passwd" ]]; then
-    env_descs+=("OLD_PASS         当前密码（可选; 目标用户非提权自改时必需）")
+    env_descs+=("OLD_PASS         current password (optional; required when the target user changes own password without privilege)")
 fi
-env_descs+=("TIMEOUT          expect 超时秒数（可选, 默认 30）")
+env_descs+=("TIMEOUT          expect timeout in seconds (optional, default 30)")
 
 desc_block=""
 for d in "${param_descs[@]}"; do
@@ -162,12 +164,12 @@ done
 read -r -d '' USAGE_TPL <<'TPL' || true
 proc usage {} {
     global argv0
-    puts stderr "用法: ${ENVPREFIX}$argv0 ${PARAMS}"
+    puts stderr "Usage: ${ENVPREFIX}$argv0 ${PARAMS}"
     puts stderr ""
-    puts stderr "位置参数:"
+    puts stderr "Positional args:"
 ${DESC}
     puts stderr ""
-    puts stderr "环境变量:"
+    puts stderr "Environment variables:"
 ${ENVDESC}
     exit 1
 }
@@ -182,7 +184,7 @@ read -r -d '' ENVCHECK_TPL <<'TPL' || true
 # 运行时校验: 缺少必需环境变量立即报错退出（凭据不进 argv, 防 ps 泄露）
 foreach _v {${REQLIST}} {
     if {![info exists env($_v)]} {
-        puts stderr "ERROR: 缺少必需的环境变量 $_v"
+        puts stderr "ERROR: missing required env var $_v"
         usage
     }
 }
@@ -228,6 +230,21 @@ FRAME
     echo
     cat "$auth_f"
     echo
+    cat <<'FRAME'
+# ------------------------------------------------------------
+# 段1.5 公共 · locale 固定 —— 认证成功后、提权/业务前执行；
+# 统一远端提示语言，规避中文 locale 下的提示漂移（调研 4.4）。
+# 注意: 要求远端为 POSIX shell；网络设备等非 shell 目标应在业务模板内处理。
+# ------------------------------------------------------------
+send "export LANG=C LC_ALL=C\r"
+expect {
+    -re {[%#$>]\s*$} { }
+    timeout { puts stderr "LOCALE_TIMEOUT"; exit 2 }
+    eof     { puts stderr "LOCALE_EOF";     exit 2 }
+}
+log_info "remote locale fixed to C"
+
+FRAME
     cat "$esc_f"
     echo
     cat "$biz_f"
@@ -251,4 +268,4 @@ FRAME
 } > "$OUT"
 
 chmod +x "$OUT"
-echo "已生成: $OUT (auth=$AUTH escalate=$ESCALATE biz=$BIZ, argc=$ARGC, env: ${REQ_ENVS:-无})"
+echo "Generated: $OUT (auth=$AUTH escalate=$ESCALATE biz=$BIZ, argc=$ARGC, env: ${REQ_ENVS:-none})"
