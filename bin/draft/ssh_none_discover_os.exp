@@ -1,9 +1,9 @@
 #!/usr/bin/expect
 # ============================================================
 # ShellExp 生成的 expect 脚本 —— 构建产物, 请勿手工编辑
-# 组合: auth=ssh escalate=sudo biz=discover_os
-# 重新生成: ./main.sh --auth ssh --escalate sudo --biz discover_os --out bin/ssh_sudo_discover_os.exp
-# 生成时间: 2026-09-02 19:33:05
+# 组合: auth=ssh escalate=none biz=discover_os
+# 重新生成: ./main.sh --auth ssh --escalate none --biz discover_os --out /home/administrator/projects/shellexp/bin/draft/ssh_none_discover_os.exp
+# 生成时间: 2026-09-03 11:36:34
 # ============================================================
 
 
@@ -15,7 +15,7 @@ if {[info exists env(TIMEOUT)]} { set timeout $env(TIMEOUT) }
 
 proc usage {} {
     global argv0
-    puts stderr "Usage: AUTH_PASS=... ESCALATE_PASS=... $argv0 <host> <port> <auth_user>"
+    puts stderr "Usage: AUTH_PASS=... $argv0 <host> <port> <auth_user>"
     puts stderr ""
     puts stderr "Positional args:"
     puts stderr "  host         target host address"
@@ -25,14 +25,13 @@ proc usage {} {
     puts stderr ""
     puts stderr "Environment variables:"
     puts stderr "  AUTH_PASS        SSH/telnet login password (required)"
-    puts stderr "  ESCALATE_PASS    privilege escalation password (required; su: target user's password, sudo: current user's password)"
     puts stderr "  TIMEOUT          expect timeout in seconds (optional, default 30)"
 
     exit 1
 }
 
 # 运行时校验: 缺少必需环境变量立即报错退出（凭据不进 argv, 防 ps 泄露）
-foreach _v {AUTH_PASS ESCALATE_PASS} {
+foreach _v {AUTH_PASS} {
     if {![info exists env($_v)]} {
         puts stderr "ERROR: missing required env var $_v"
         usage
@@ -134,38 +133,8 @@ expect {
 log_info "remote locale fixed to C"
 
 # ------------------------------------------------------------
-# 段2 提权 · sudo —— sudo -S -i 提权为 root（输入的是当前登录用户的密码）
-# REQUIRE_ENV: ESCALATE_PASS
-# 前置: 已到达远端 shell 提示符（认证段完成）
-# 退出码: 7 提权失败 / 超时 / 会话中断
-# 注意: NOPASSWD 白名单场景无密码提示，直接命中提示符分支
+# 段2 提权 · none —— 空段：登录身份已满足业务权限
 # ------------------------------------------------------------
-
-if {![info exists env(ESCALATE_PASS)]} { die 1 "missing env ESCALATE_PASS" }
-
-log_info "escalate: sudo -S -i"
-send "sudo -S -i\r"
-
-set _sudo_tries 0
-expect {
-    -re {not in the sudoers|sudo: 1 incorrect|[Ss]orry, try again|认证失败} {
-        puts stderr "ESCALATE_DENIED"
-        exit 7
-    }
-    -re {\[sudo\]\s*[Pp]assword|[Pp]assword\s*[:：]\s*$} {
-        if {[incr _sudo_tries] > 1} { puts stderr "ESCALATE_DENIED"; exit 7 }
-        log_info "sudo password prompt hit"
-        log_user 0
-        send -- "$env(ESCALATE_PASS)\r"
-        exp_continue
-    }
-    -re {[%#$>]\s*$} {
-        log_user 1
-        log_info "escalated to root via sudo"
-    }
-    timeout { puts stderr "ESCALATE_TIMEOUT"; exit 7 }
-    eof     { puts stderr "ESCALATE_EOF";     exit 7 }
-}
 
 # ------------------------------------------------------------
 # 段3 业务 · discover_os —— 探测远端资产类型（OS 家族/内核/发行版/改密能力）

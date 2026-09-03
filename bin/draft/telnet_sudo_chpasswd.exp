@@ -1,9 +1,9 @@
 #!/usr/bin/expect
 # ============================================================
 # ShellExp 生成的 expect 脚本 —— 构建产物, 请勿手工编辑
-# 组合: auth=ssh escalate=su biz=chpasswd
-# 重新生成: ./main.sh --auth ssh --escalate su --biz chpasswd --out bin/ssh_su_chpasswd.exp
-# 生成时间: 2026-09-02 19:33:04
+# 组合: auth=telnet escalate=sudo biz=chpasswd
+# 重新生成: ./main.sh --auth telnet --escalate sudo --biz chpasswd --out /home/administrator/projects/shellexp/bin/draft/telnet_sudo_chpasswd.exp
+# 生成时间: 2026-09-03 11:36:35
 # ============================================================
 
 
@@ -15,13 +15,12 @@ if {[info exists env(TIMEOUT)]} { set timeout $env(TIMEOUT) }
 
 proc usage {} {
     global argv0
-    puts stderr "Usage: AUTH_PASS=... ESCALATE_PASS=... NEW_PASS=... $argv0 <host> <port> <auth_user> <escalate_user> <target_user>"
+    puts stderr "Usage: AUTH_PASS=... ESCALATE_PASS=... NEW_PASS=... $argv0 <host> <port> <auth_user> <target_user>"
     puts stderr ""
     puts stderr "Positional args:"
     puts stderr "  host         target host address"
-    puts stderr "  port         SSH port (e.g. 22)"
-    puts stderr "  auth_user    SSH login username"
-    puts stderr "  escalate_user target user to su into"
+    puts stderr "  port         telnet port (e.g. 23)"
+    puts stderr "  auth_user    login username"
     puts stderr "  target_user  user whose password to change"
 
     puts stderr ""
@@ -42,12 +41,11 @@ foreach _v {AUTH_PASS ESCALATE_PASS NEW_PASS} {
     }
 }
 
-if {$argc != 5} { usage }
+if {$argc != 4} { usage }
 set host [lindex $argv 0]
 set port [lindex $argv 1]
 set auth_user [lindex $argv 2]
-set escalate_user [lindex $argv 3]
-set target_user [lindex $argv 4]
+set target_user [lindex $argv 3]
 
 
 
@@ -77,45 +75,46 @@ proc quote_single {s} {
 }
 
 # ------------------------------------------------------------
-# 段1 认证 · ssh —— SSH 密码登录（全脚本唯一 spawn 点）
+# 段1 认证 · telnet —— Telnet 密码登录（全脚本唯一 spawn 点）
 # REQUIRE_ENV: AUTH_PASS
 # REQUIRE_ARGV: host target host address
-# REQUIRE_ARGV: port SSH port (e.g. 22)
-# REQUIRE_ARGV: auth_user SSH login username
+# REQUIRE_ARGV: port telnet port (e.g. 23)
+# REQUIRE_ARGV: auth_user login username
 # 前置: 无
 # 后置: 已到达远端 shell 提示符（locale 固定由公共帧完成，见 main.sh 段1.5）
 # 退出码: 2 认证失败 / 连接不可达 / 超时 / 会话中断
+# 安全警告: Telnet 明文传输凭据，仅限独立管理网/带外网使用（调研 5.4）
 # ------------------------------------------------------------
-# 模式说明（调研 11.4 实测坑位）：
-#   - 用 [Pp] 字符类而非 (?i)，规避 Expect gate keeper 优化导致大写 P 永不匹配
-#   - 提示符/密码提示均锚定行尾 \s*$，避免误匹配命令回显
 
 if {![info exists env(AUTH_PASS)]} { die 1 "missing env AUTH_PASS" }
 
-log_info "spawn ssh -p $port -o ConnectTimeout=10 $auth_user@$host"
-spawn ssh -p $port -o ConnectTimeout=10 $auth_user@$host
+log_info "spawn telnet $host $port"
+spawn telnet $host $port
 
-set _auth_tries 0
+set _login_tries 0
+set _pass_tries 0
 expect {
-    -re {[Pp]ermission [Dd]enied|Host key verification failed} {
-        puts stderr "AUTH_DENIED"
-        exit 2
-    }
-    -re {Connection (refused|timed out|reset|closed)|No route to host|Network is unreachable} {
+    -re {Connection refused|Unable to connect|No route to host|Network is unreachable|Connection timed out|Connection closed by foreign host} {
         puts stderr "AUTH_UNREACHABLE"
         exit 2
     }
-    -re {yes/no} {
-        send "yes\r"
+    -re {(Login|Username|login)\s*[:：]\s*$} {
+        # 登录名提示反复出现视为认证失败（单次失败即退出，防锁定）
+        if {[incr _login_tries] > 1} { puts stderr "AUTH_DENIED"; exit 2 }
+        log_info "login prompt hit, sending auth_user"
+        send -- "$auth_user\r"
         exp_continue
     }
     -re {[Pp]assword\s*[:：]\s*$} {
-        # 单次失败即退出，防止连续错密触发账号锁定（调研 6.1 场景 E）
-        if {[incr _auth_tries] > 1} { puts stderr "AUTH_DENIED"; exit 2 }
+        if {[incr _pass_tries] > 1} { puts stderr "AUTH_DENIED"; exit 2 }
         log_info "password prompt hit, sending AUTH_PASS"
         log_user 0
         send -- "$env(AUTH_PASS)\r"
         exp_continue
+    }
+    -re {Login incorrect|认证失败} {
+        puts stderr "AUTH_DENIED"
+        exit 2
     }
     -re {[%#$>]\s*$} {
         log_user 1
@@ -139,35 +138,34 @@ expect {
 log_info "remote locale fixed to C"
 
 # ------------------------------------------------------------
-# 段2 提权 · su —— su - 切换目标身份（输入的是目标身份的密码）
+# 段2 提权 · sudo —— sudo -S -i 提权为 root（输入的是当前登录用户的密码）
 # REQUIRE_ENV: ESCALATE_PASS
-# REQUIRE_ARGV: escalate_user target user to su into
 # 前置: 已到达远端 shell 提示符（认证段完成）
 # 退出码: 7 提权失败 / 超时 / 会话中断
-# 注意: root 登录时 su 到普通用户无需密码，直接命中提示符分支
+# 注意: NOPASSWD 白名单场景无密码提示，直接命中提示符分支
 # ------------------------------------------------------------
 
 if {![info exists env(ESCALATE_PASS)]} { die 1 "missing env ESCALATE_PASS" }
 
-log_info "escalate: su - $escalate_user"
-send "su - $escalate_user\r"
+log_info "escalate: sudo -S -i"
+send "sudo -S -i\r"
 
-set _su_tries 0
+set _sudo_tries 0
 expect {
-    -re {su: [Aa]uthentication [Ff]ailure|su: [Ss]orry|[Ii]ncorrect [Pp]assword|认证失败|Unknown id|does not exist|no passwd entry} {
+    -re {not in the sudoers|sudo: 1 incorrect|[Ss]orry, try again|认证失败} {
         puts stderr "ESCALATE_DENIED"
         exit 7
     }
-    -re {[Pp]assword\s*[:：]\s*$} {
-        if {[incr _su_tries] > 1} { puts stderr "ESCALATE_DENIED"; exit 7 }
-        log_info "su password prompt hit"
+    -re {\[sudo\]\s*[Pp]assword|[Pp]assword\s*[:：]\s*$} {
+        if {[incr _sudo_tries] > 1} { puts stderr "ESCALATE_DENIED"; exit 7 }
+        log_info "sudo password prompt hit"
         log_user 0
         send -- "$env(ESCALATE_PASS)\r"
         exp_continue
     }
     -re {[%#$>]\s*$} {
         log_user 1
-        log_info "escalated to $escalate_user via su"
+        log_info "escalated to root via sudo"
     }
     timeout { puts stderr "ESCALATE_TIMEOUT"; exit 7 }
     eof     { puts stderr "ESCALATE_EOF";     exit 7 }

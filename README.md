@@ -19,8 +19,11 @@
 
 ```text
 shellexp/
-├── main.sh                              # 生成器：--auth/--escalate/--biz/--out
-├── bin/                                 # 构建产物：可执行 expect 脚本（勿手工编辑）
+├── main.sh                              # 生成器：--auth/--escalate/--biz [--out]
+├── bin/
+│   ├── draft/                           # 生成产物（草稿区，可随时重建，勿手工编辑）
+│   ├── release/                         # 人工归档：已适配调试完成的 draft 脚本
+│   └── manual/                          # 人工归档：用户自定义脚本（生成器不写入）
 ├── script/
 │   ├── lib/
 │   │   └── util.tcl                     # 公共工具函数：日志、die、POSIX 单引号转义
@@ -41,6 +44,8 @@ shellexp/
 └── .examples/                           # 历史参考样例
 ```
 
+bin/ 三个子目录的工作流：`main.sh` 生成的脚本落在 `bin/draft/`，针对目标适配调试通过后，**由用户手动**移入 `bin/release/` 归档；`bin/manual/` 存放不依赖生成器的自定义脚本，生成器会拒绝写入这两个目录。
+
 ## 快速开始
 
 ```bash
@@ -50,16 +55,21 @@ sudo apt-get install -y expect tcl
 # 2. 查看可用模板
 ./main.sh --list
 
-# 3. 生成脚本：spider 登录 → sudo 提权 → 非交互改密
-./main.sh --auth ssh --escalate sudo --biz chpasswd --out bin/ssh_sudo_chpasswd.exp
+# 3. 生成脚本：spider 登录 → sudo 提权 → 非交互改密（缺省输出 bin/draft/）
+./main.sh --auth ssh --escalate sudo --biz chpasswd
+#   等价于: ./main.sh --auth ssh --escalate sudo --biz chpasswd \
+#               --out bin/draft/ssh_sudo_chpasswd.exp
 
 # 4. 运行
 AUTH_PASS='登录密码' ESCALATE_PASS='sudo密码' NEW_PASS='新密码' \
-    ./bin/ssh_sudo_chpasswd.exp 10.0.0.1 22 spider targetuser
+    ./bin/draft/ssh_sudo_chpasswd.exp 10.0.0.1 22 spider targetuser
 
 # 5. 资产类型探测（登录后只读采集，结果输出到 stdout）
-AUTH_PASS='登录密码' ./bin/ssh_none_discover_os.exp 10.0.0.1 22 spider
+AUTH_PASS='登录密码' ./bin/draft/ssh_none_discover_os.exp 10.0.0.1 22 spider
 # DISCOVER os=Linux kernel=5.15.0-73-generic id=ubuntu chpasswd=yes
+
+# 6. 适配调试通过后，手动归档到 release/
+mv bin/draft/ssh_sudo_chpasswd.exp bin/release/
 ```
 
 ## 环境变量契约
@@ -117,6 +127,7 @@ autoexpect -p -f /tmp/session.exp ssh admin@10.0.0.1
 - **新增提权方式**：`script/biz/escalate/escalate_<name>.tpl`
 - **新增业务**：`script/biz/<类目>/<名称>.tpl`（`--biz` 按文件名在业务子目录中唯一匹配）
 - 模板头部用 `# REQUIRE_ENV:` / `# REQUIRE_ARGV: <名> <英文描述>` 声明契约，`main.sh` 自动收集校验
+- **自定义脚本**：与生成器无关的脚本放 `bin/manual/`，生成器不会覆盖该目录
 
 ## License
 

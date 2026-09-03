@@ -3,7 +3,8 @@
 # ShellExp main.sh — 模板拼装生成器
 #
 # 将 script/biz/ 下的段模板（认证 auth -> 提权 escalate -> 业务 biz）
-# 按需拼装为完整 expect 脚本，输出到 --out 指定路径（惯例为 bin/ 下）。
+# 按需拼装为完整 expect 脚本，默认输出到 bin/draft/（--out 可指定其他路径）。
+# bin/ 目录职责: draft=生成草稿(可随时重建) / release=人工归档已验证脚本 / manual=人工自定义脚本
 #
 # 拼装帧: shebang 头 -> 公共头(timeout/环境变量校验) -> usage/argv
 #         -> script/lib/util.tcl 工具函数 -> auth 段 -> escalate 段
@@ -19,19 +20,25 @@ die() { echo "main.sh: $1" >&2; exit "${2:-64}"; }
 show_usage() {
     cat <<'USAGE'
 Usage:
-  ./main.sh --auth <name> --escalate <name> --biz <name> --out <file>
+  ./main.sh --auth <name> --escalate <name> --biz <name> [--out <file>]
       --auth <name>      auth segment:     script/biz/auth/auth_<name>.tpl (ssh/telnet)
       --escalate <name>  escalate segment: script/biz/escalate/escalate_<name>.tpl (none/su/sudo)
       --biz <name>       biz segment:      unique <name>.tpl under script/biz/ category dirs
-      --out <file>       output path (conventionally under bin/)
+      --out <file>       output path (optional; default bin/draft/<auth>_<escalate>_<biz>.exp)
 
   ./main.sh --list       list available segment templates
   ./main.sh --help       show this help
 
+bin/ directory layout:
+  bin/draft/    generated drafts (safe to regenerate)
+  bin/release/  manually archived scripts, verified/tested by users
+  bin/manual/   manually maintained custom scripts
+
 Example:
-  ./main.sh --auth ssh --escalate sudo --biz chpasswd --out bin/ssh_sudo_chpasswd.exp
+  ./main.sh --auth ssh --escalate sudo --biz chpasswd
+      # -> bin/draft/ssh_sudo_chpasswd.exp
   AUTH_PASS='loginpass' ESCALATE_PASS='sudopass' NEW_PASS='newpass' \
-      ./bin/ssh_sudo_chpasswd.exp <host> <port> <auth_user> <target_user>
+      ./bin/draft/ssh_sudo_chpasswd.exp <host> <port> <auth_user> <target_user>
 USAGE
 }
 
@@ -69,7 +76,18 @@ done
 [[ -n "$AUTH"     ]] || die "missing --auth" 64
 [[ -n "$ESCALATE" ]] || die "missing --escalate" 64
 [[ -n "$BIZ"      ]] || die "missing --biz" 64
-[[ -n "$OUT"      ]] || die "missing --out" 64
+
+# --out 可选: 缺省输出到 bin/draft/<auth>_<escalate>_<biz>.exp（基于脚本自身路径定位）
+if [[ -z "$OUT" ]]; then
+    OUT="$ROOT/bin/draft/${AUTH}_${ESCALATE}_${BIZ}.exp"
+fi
+
+# 防护: 禁止生成器写入人工归档区（bin/release、bin/manual 由用户手工管理）
+case "$(realpath -m "$OUT")" in
+    "$ROOT/bin/release/"*|"$ROOT/bin/manual/"*)
+        die "refusing to write into manual-managed dir (bin/release, bin/manual): $OUT" 64
+        ;;
+esac
 
 # ----------------------------------------------------------------
 # 定位段模板

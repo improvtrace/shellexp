@@ -2,8 +2,8 @@
 # ============================================================
 # ShellExp 生成的 expect 脚本 —— 构建产物, 请勿手工编辑
 # 组合: auth=ssh escalate=sudo biz=passwd
-# 重新生成: ./main.sh --auth ssh --escalate sudo --biz passwd --out bin/ssh_sudo_passwd.exp
-# 生成时间: 2026-09-02 19:33:05
+# 重新生成: ./main.sh --auth ssh --escalate sudo --biz passwd --out /home/administrator/projects/shellexp/bin/draft/ssh_sudo_passwd.exp
+# 生成时间: 2026-09-03 11:36:34
 # ============================================================
 
 

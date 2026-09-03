@@ -2,8 +2,8 @@
 # ============================================================
 # ShellExp 生成的 expect 脚本 —— 构建产物, 请勿手工编辑
 # 组合: auth=telnet escalate=none biz=discover_os
-# 重新生成: ./main.sh --auth telnet --escalate none --biz discover_os --out bin/telnet_none_discover_os.exp
-# 生成时间: 2026-09-02 19:33:05
+# 重新生成: ./main.sh --auth telnet --escalate none --biz discover_os --out /home/administrator/projects/shellexp/bin/draft/telnet_none_discover_os.exp
+# 生成时间: 2026-09-03 11:36:34
 # ============================================================
 
 
