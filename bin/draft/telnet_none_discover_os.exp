@@ -3,7 +3,7 @@
 # ShellExp 生成的 expect 脚本 —— 构建产物, 请勿手工编辑
 # 组合: auth=telnet escalate=none biz=discover_os
 # 重新生成: ./main.sh --auth telnet --escalate none --biz discover_os --out /home/administrator/projects/shellexp/bin/draft/telnet_none_discover_os.exp
-# 生成时间: 2026-09-03 17:57:04
+# 生成时间: 2026-09-03 18:36:00
 # ============================================================
 
 
@@ -26,6 +26,7 @@ proc usage {} {
     puts stderr "Environment variables:"
     puts stderr "  AUTH_PASS        SSH/telnet login password (required)"
     puts stderr "  TIMEOUT          expect timeout in seconds (optional, default 30)"
+    puts stderr "  PROXYCHAINS_CONF proxychains4 config file path (maintained by caller); when set, telnet runs wrapped as \"proxychains4 -q -f <conf> telnet\" (optional)"
 
     exit 1
 }
@@ -76,16 +77,24 @@ proc quote_single {s} {
 # REQUIRE_ARGV: host target host address
 # REQUIRE_ARGV: port telnet port (e.g. 23)
 # REQUIRE_ARGV: auth_user login username
+# OPT_ENV: PROXYCHAINS_CONF proxychains4 config file path (maintained by caller); when set, telnet runs wrapped as "proxychains4 -q -f <conf> telnet"
 # 前置: 无
 # 后置: 已到达远端 shell 提示符（locale 固定由公共帧完成，见 main.sh 段1.5）
 # 退出码: 2 认证失败 / 连接不可达 / 超时 / 会话中断
 # 安全警告: Telnet 明文传输凭据，仅限独立管理网/带外网使用（调研 5.4）
+# 过代理说明: 框架仅提供 proxychains4 包裹能力，配置文件由调用者自行生成维护（内容零认知）；
+#            proxychains4 对 telnet 的要求见 README「过代理连接」
 # ------------------------------------------------------------
 
 if {![info exists env(AUTH_PASS)]} { die 1 "missing env AUTH_PASS" }
 
-log_info "spawn telnet $host $port"
-spawn telnet $host $port
+if {[info exists env(PROXYCHAINS_CONF)] && $env(PROXYCHAINS_CONF) ne ""} {
+    log_info "spawn proxychains4 -q -f $env(PROXYCHAINS_CONF) telnet $host $port"
+    spawn proxychains4 -q -f $env(PROXYCHAINS_CONF) telnet $host $port
+} else {
+    log_info "spawn telnet $host $port (direct)"
+    spawn telnet $host $port
+}
 
 set _login_tries 0
 set _pass_tries 0

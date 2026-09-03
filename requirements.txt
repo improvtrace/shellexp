@@ -6,6 +6,10 @@
 #   RHEL / CentOS / Rocky / Alma: sudo yum install -y expect tcl
 #   openSUSE / SLES:              sudo zypper install -y expect tcl
 #
+# 可选依赖（仅 telnet 过代理需要，由调用者自行安装与维护配置）：
+#   proxychains4   Debian/Ubuntu: sudo apt-get install -y proxychains4
+#                  RHEL/CentOS:   sudo yum install -y proxychains-ng
+#
 # 最低版本说明：
 #   expect >= 5.45  spawn/expect/send/exp_continue/log_user（5.45 为主流发行版基线，
 #                   注意 5.45 gate keeper 优化对 (?i) 正则的影响，模板已用字符类规避）

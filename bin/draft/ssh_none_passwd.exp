@@ -3,7 +3,7 @@
 # ShellExp 生成的 expect 脚本 —— 构建产物, 请勿手工编辑
 # 组合: auth=ssh escalate=none biz=passwd
 # 重新生成: ./main.sh --auth ssh --escalate none --biz passwd --out /home/administrator/projects/shellexp/bin/draft/ssh_none_passwd.exp
-# 生成时间: 2026-09-03 18:00:36
+# 生成时间: 2026-09-03 18:35:59
 # ============================================================
 
 

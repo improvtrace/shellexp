@@ -83,6 +83,7 @@ mv bin/draft/ssh_sudo_chpasswd.exp bin/release/
 | `TIMEOUT` | 可选 | 公共头 | expect 超时秒数，默认 30 |
 | `PROXY_COMMAND` | 可选 | auth=ssh | 完整 ProxyCommand 命令串（见「过代理连接」），框架原样注入 `-o ProxyCommand=...` |
 | `SSH_KEEPALIVE` | 可选 | auth=ssh | `ServerAliveInterval` 秒数；仅过代理时生效，默认 30，0 关闭 |
+| `PROXYCHAINS_CONF` | 可选 | auth=telnet | proxychains4 配置文件路径（调用者自行维护）；设置后 telnet 经 `proxychains4 -q -f <conf>` 包裹 |
 
 ## 退出码
 
@@ -125,6 +126,27 @@ AUTH_PASS=... ./bin/draft/ssh_none_chpasswd.exp host 22 root bob
 - 代理认证凭据严禁写死在 `PROXY_COMMAND` / 脚本内；优先选支持环境变量/文件凭证的工具（connect-proxy / corkscrew / socat）
 - 若工具仅支持命令行传凭证（如 ncat `--proxy-auth user:pass`），用 `$VAR` 运行时展开且凭证仅存内存，并知悉 argv 仍有 `ps` 可见的残余暴露
 - 过代理易被空闲切断（调研坑点 3），默认 `ServerAliveInterval=30`，可用 `SSH_KEEPALIVE` 覆盖（0 关闭）
+
+### telnet 过代理（proxychains4）
+
+框架同样只提供包裹能力，不维护配置。设置 `PROXYCHAINS_CONF`（proxychains4 配置文件路径）后，telnet 自动经 `proxychains4 -q -f <conf>` 包裹执行；未设置则直连。
+
+```bash
+# 直连（默认）
+AUTH_PASS=... ./bin/draft/telnet_none_chpasswd.exp host 23 root bob
+
+# 过代理：PROXYCHAINS_CONF 指向调用者自行维护的配置文件
+export PROXYCHAINS_CONF=/etc/proxychains.d/1a2b3c4d.conf
+AUTH_PASS=... ./bin/draft/telnet_none_chpasswd.exp host 23 root bob
+```
+
+- **配置文件由调用者自行维护**：命名与存放（如按代理信息 hash 生成文件名、置于 `/etc/proxychains.d/`）及内容均为调用者职责，框架零认知
+- **proxychains4 对 telnet 的要求**：
+  - telnet 必须是 glibc **动态链接**（busybox / 静态编译版本会完全失效），可用 `ldd "$(which telnet)"` 自检
+  - 仅支持 TCP（telnet 本身即 TCP，符合）
+  - `-q` 用于关闭 stderr 调试输出、避免干扰终端（框架已固定加 `-q`）
+  - LD_PRELOAD 劫持属**应急手段**，存在流量逃逸、排查困难等固有缺陷，不建议作为生产长期依赖
+  - telnet 过代理后仍是明文（RFC 854），仅限独立管理网 / 带外网
 
 ## 用 autoexpect 开发新业务模板
 
