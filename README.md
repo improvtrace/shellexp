@@ -81,6 +81,8 @@ mv bin/draft/ssh_sudo_chpasswd.exp bin/release/
 | `NEW_PASS` | password 类业务 | biz | 新密码 |
 | `OLD_PASS` | 可选 | biz=passwd | 当前密码（目标用户非提权自改时需要） |
 | `TIMEOUT` | 可选 | 公共头 | expect 超时秒数，默认 30 |
+| `PROXY_COMMAND` | 可选 | auth=ssh | 完整 ProxyCommand 命令串（见「过代理连接」），框架原样注入 `-o ProxyCommand=...` |
+| `SSH_KEEPALIVE` | 可选 | auth=ssh | `ServerAliveInterval` 秒数；仅过代理时生效，默认 30，0 关闭 |
 
 ## 退出码
 
@@ -92,6 +94,37 @@ mv bin/draft/ssh_sudo_chpasswd.exp bin/release/
 | 6 | 业务失败（改密被拒、探测超时等） |
 | 7 | 提权失败 |
 | 64 | 生成器参数错误 |
+
+## 过代理连接（仅 ssh）
+
+框架对 `PROXY_COMMAND` **零解析**：设置该环境变量后，`auth=ssh` 会原样注入 `-o ProxyCommand=...`；telnet 不支持过代理（且 telnet 无加密、过代理后仍是明文，仅限管理网）。以下写法均为**建议**，框架不内置任何命令细节。
+
+```bash
+# 直连（默认，未设置 PROXY_COMMAND）
+AUTH_PASS=... ./bin/draft/ssh_none_chpasswd.exp host 22 root bob
+
+# 过代理：PROXY_COMMAND 中的 %h/%p 由 ssh 自动展开为目标主机/端口
+export PROXY_COMMAND="nc -X connect -x proxy.corp:8080 %h %p"
+AUTH_PASS=... ./bin/draft/ssh_none_chpasswd.exp host 22 root bob
+```
+
+**变量传递**：目标地址用 ssh 原生 token `%h` / `%p`（ssh 自动展开）；自有参数（代理地址等）在 `export` 时由 shell 展开；框架只原样透传，不解析、不转义、不做占位符替换。
+
+**配方建议**（工具 × 代理类型 × 认证，任选其一）：
+
+| 场景 | `PROXY_COMMAND` | 代理认证凭据 |
+| --- | --- | --- |
+| HTTP（无认证） | `nc -X connect -x proxy:8080 %h %p` | — |
+| SOCKS5（无认证） | `nc -X 5 -x proxy:1080 %h %p` | — |
+| SOCKS5（带认证） | `connect -S proxy:1080 %h %p` | 环境变量 `SOCKS5_USER` / `SOCKS5_PASSWD` |
+| HTTP（带认证） | `corkscrew proxy 8080 %h %p ~/.ssh/proxyauth` | 600 文件 `user:pass` |
+| HTTP（带认证） | `socat - PROXY:proxy:%h:%p,proxyport=8080,proxy-authorization-file=~/.ssh/proxyauth` | 600 文件 |
+
+**安全红线**：
+
+- 代理认证凭据严禁写死在 `PROXY_COMMAND` / 脚本内；优先选支持环境变量/文件凭证的工具（connect-proxy / corkscrew / socat）
+- 若工具仅支持命令行传凭证（如 ncat `--proxy-auth user:pass`），用 `$VAR` 运行时展开且凭证仅存内存，并知悉 argv 仍有 `ps` 可见的残余暴露
+- 过代理易被空闲切断（调研坑点 3），默认 `ServerAliveInterval=30`，可用 `SSH_KEEPALIVE` 覆盖（0 关闭）
 
 ## 用 autoexpect 开发新业务模板
 
@@ -126,7 +159,7 @@ autoexpect -p -f /tmp/session.exp ssh admin@10.0.0.1
 - **新增认证方式**：`script/biz/auth/auth_<name>.tpl`（如 `auth_sshkey`）
 - **新增提权方式**：`script/biz/escalate/escalate_<name>.tpl`
 - **新增业务**：`script/biz/<类目>/<名称>.tpl`（`--biz` 按文件名在业务子目录中唯一匹配）
-- 模板头部用 `# REQUIRE_ENV:` / `# REQUIRE_ARGV: <名> <英文描述>` 声明契约，`main.sh` 自动收集校验
+- 模板头部用 `# REQUIRE_ENV:` / `# REQUIRE_ARGV: <名> <英文描述>` / `# OPT_ENV: <名> <英文描述>` 声明契约，`main.sh` 自动收集（必填校验 + usage 展示）
 - **自定义脚本**：与生成器无关的脚本放 `bin/manual/`，生成器不会覆盖该目录
 
 ## License

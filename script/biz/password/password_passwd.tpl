@@ -2,7 +2,7 @@
 # 段3 业务 · password/passwd —— 交互式 passwd 改密兜底（中英双语提示）
 # REQUIRE_ENV: NEW_PASS
 # REQUIRE_ARGV: target_user user whose password to change
-# 可选环境变量: OLD_PASS —— 非 root 上下文自改密码时需提供当前密码
+# OPT_ENV: OLD_PASS current password, required when the target user changes own password without privilege
 # 前置: 会话已具备 root 权限（直登 root 或经提权段），或为本人自改
 # 退出码: 6 业务失败（含策略拒绝熔断，最多 3 轮，调研 6.2）
 # 说明: send 直写 pty、不经远端 shell 解析，新密码无需单引号转义

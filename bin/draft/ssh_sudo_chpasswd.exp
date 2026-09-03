@@ -3,7 +3,7 @@
 # ShellExp 生成的 expect 脚本 —— 构建产物, 请勿手工编辑
 # 组合: auth=ssh escalate=sudo biz=chpasswd
 # 重新生成: ./main.sh --auth ssh --escalate sudo --biz chpasswd --out /home/administrator/projects/shellexp/bin/draft/ssh_sudo_chpasswd.exp
-# 生成时间: 2026-09-03 11:36:34
+# 生成时间: 2026-09-03 17:57:04
 # ============================================================
 
 
@@ -29,6 +29,8 @@ proc usage {} {
     puts stderr "  ESCALATE_PASS    privilege escalation password (required; su: target user's password, sudo: current user's password)"
     puts stderr "  NEW_PASS         new password (required)"
     puts stderr "  TIMEOUT          expect timeout in seconds (optional, default 30)"
+    puts stderr "  PROXY_COMMAND    complete ProxyCommand string (e.g. \"nc -X connect -x proxy:8080 %h %p\"); framework injects it verbatim as \"-o ProxyCommand=...\" (optional)"
+    puts stderr "  SSH_KEEPALIVE    ServerAliveInterval seconds (proxy only, default 30, 0 disables) (optional)"
 
     exit 1
 }
@@ -80,6 +82,8 @@ proc quote_single {s} {
 # REQUIRE_ARGV: host target host address
 # REQUIRE_ARGV: port SSH port (e.g. 22)
 # REQUIRE_ARGV: auth_user SSH login username
+# OPT_ENV: PROXY_COMMAND complete ProxyCommand string (e.g. "nc -X connect -x proxy:8080 %h %p"); framework injects it verbatim as "-o ProxyCommand=..."
+# OPT_ENV: SSH_KEEPALIVE ServerAliveInterval seconds (proxy only, default 30, 0 disables)
 # 前置: 无
 # 后置: 已到达远端 shell 提示符（locale 固定由公共帧完成，见 main.sh 段1.5）
 # 退出码: 2 认证失败 / 连接不可达 / 超时 / 会话中断
@@ -87,11 +91,27 @@ proc quote_single {s} {
 # 模式说明（调研 11.4 实测坑位）：
 #   - 用 [Pp] 字符类而非 (?i)，规避 Expect gate keeper 优化导致大写 P 永不匹配
 #   - 提示符/密码提示均锚定行尾 \s*$，避免误匹配命令回显
+# 过代理说明（详见 README「过代理连接」，均为建议，框架不解析 PROXY_COMMAND 内容）：
+#   - PROXY_COMMAND 存在且非空时注入 -o ProxyCommand；telnet 不支持过代理
+#   - 过代理易被空闲切断（调研坑点 3），默认 ServerAliveInterval=30，SSH_KEEPALIVE 可覆盖（0=关闭）
 
 if {![info exists env(AUTH_PASS)]} { die 1 "missing env AUTH_PASS" }
 
-log_info "spawn ssh -p $port -o ConnectTimeout=10 $auth_user@$host"
-spawn ssh -p $port -o ConnectTimeout=10 $auth_user@$host
+set _ssh_opts [list -p $port -o ConnectTimeout=10]
+set _proxy 0
+if {[info exists env(PROXY_COMMAND)] && $env(PROXY_COMMAND) ne ""} {
+    set _proxy 1
+    lappend _ssh_opts -o "ProxyCommand=$env(PROXY_COMMAND)"
+    set _ka 30
+    if {[info exists env(SSH_KEEPALIVE)]} { set _ka $env(SSH_KEEPALIVE) }
+    lappend _ssh_opts -o "ServerAliveInterval=$_ka"
+}
+if {$_proxy} {
+    log_info "spawn ssh -p $port $auth_user@$host (via ProxyCommand)"
+} else {
+    log_info "spawn ssh -p $port $auth_user@$host (direct)"
+}
+spawn {*}[concat [list ssh] $_ssh_opts [list $auth_user@$host]]
 
 set _auth_tries 0
 expect {

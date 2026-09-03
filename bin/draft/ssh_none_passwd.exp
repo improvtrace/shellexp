@@ -3,7 +3,7 @@
 # ShellExp 生成的 expect 脚本 —— 构建产物, 请勿手工编辑
 # 组合: auth=ssh escalate=none biz=passwd
 # 重新生成: ./main.sh --auth ssh --escalate none --biz passwd --out /home/administrator/projects/shellexp/bin/draft/ssh_none_passwd.exp
-# 生成时间: 2026-09-03 11:36:34
+# 生成时间: 2026-09-03 18:00:36
 # ============================================================
 
 
@@ -27,8 +27,10 @@ proc usage {} {
     puts stderr "Environment variables:"
     puts stderr "  AUTH_PASS        SSH/telnet login password (required)"
     puts stderr "  NEW_PASS         new password (required)"
-    puts stderr "  OLD_PASS         current password (optional; required when the target user changes own password without privilege)"
     puts stderr "  TIMEOUT          expect timeout in seconds (optional, default 30)"
+    puts stderr "  PROXY_COMMAND    complete ProxyCommand string (e.g. \"nc -X connect -x proxy:8080 %h %p\"); framework injects it verbatim as \"-o ProxyCommand=...\" (optional)"
+    puts stderr "  SSH_KEEPALIVE    ServerAliveInterval seconds (proxy only, default 30, 0 disables) (optional)"
+    puts stderr "  OLD_PASS         current password, required when the target user changes own password without privilege (optional)"
 
     exit 1
 }
@@ -80,6 +82,8 @@ proc quote_single {s} {
 # REQUIRE_ARGV: host target host address
 # REQUIRE_ARGV: port SSH port (e.g. 22)
 # REQUIRE_ARGV: auth_user SSH login username
+# OPT_ENV: PROXY_COMMAND complete ProxyCommand string (e.g. "nc -X connect -x proxy:8080 %h %p"); framework injects it verbatim as "-o ProxyCommand=..."
+# OPT_ENV: SSH_KEEPALIVE ServerAliveInterval seconds (proxy only, default 30, 0 disables)
 # 前置: 无
 # 后置: 已到达远端 shell 提示符（locale 固定由公共帧完成，见 main.sh 段1.5）
 # 退出码: 2 认证失败 / 连接不可达 / 超时 / 会话中断
@@ -87,11 +91,27 @@ proc quote_single {s} {
 # 模式说明（调研 11.4 实测坑位）：
 #   - 用 [Pp] 字符类而非 (?i)，规避 Expect gate keeper 优化导致大写 P 永不匹配
 #   - 提示符/密码提示均锚定行尾 \s*$，避免误匹配命令回显
+# 过代理说明（详见 README「过代理连接」，均为建议，框架不解析 PROXY_COMMAND 内容）：
+#   - PROXY_COMMAND 存在且非空时注入 -o ProxyCommand；telnet 不支持过代理
+#   - 过代理易被空闲切断（调研坑点 3），默认 ServerAliveInterval=30，SSH_KEEPALIVE 可覆盖（0=关闭）
 
 if {![info exists env(AUTH_PASS)]} { die 1 "missing env AUTH_PASS" }
 
-log_info "spawn ssh -p $port -o ConnectTimeout=10 $auth_user@$host"
-spawn ssh -p $port -o ConnectTimeout=10 $auth_user@$host
+set _ssh_opts [list -p $port -o ConnectTimeout=10]
+set _proxy 0
+if {[info exists env(PROXY_COMMAND)] && $env(PROXY_COMMAND) ne ""} {
+    set _proxy 1
+    lappend _ssh_opts -o "ProxyCommand=$env(PROXY_COMMAND)"
+    set _ka 30
+    if {[info exists env(SSH_KEEPALIVE)]} { set _ka $env(SSH_KEEPALIVE) }
+    lappend _ssh_opts -o "ServerAliveInterval=$_ka"
+}
+if {$_proxy} {
+    log_info "spawn ssh -p $port $auth_user@$host (via ProxyCommand)"
+} else {
+    log_info "spawn ssh -p $port $auth_user@$host (direct)"
+}
+spawn {*}[concat [list ssh] $_ssh_opts [list $auth_user@$host]]
 
 set _auth_tries 0
 expect {
@@ -144,7 +164,7 @@ log_info "remote locale fixed to C"
 # 段3 业务 · password/passwd —— 交互式 passwd 改密兜底（中英双语提示）
 # REQUIRE_ENV: NEW_PASS
 # REQUIRE_ARGV: target_user user whose password to change
-# 可选环境变量: OLD_PASS —— 非 root 上下文自改密码时需提供当前密码
+# OPT_ENV: OLD_PASS current password, required when the target user changes own password without privilege
 # 前置: 会话已具备 root 权限（直登 root 或经提权段），或为本人自改
 # 退出码: 6 业务失败（含策略拒绝熔断，最多 3 轮，调研 6.2）
 # 说明: send 直写 pty、不经远端 shell 解析，新密码无需单引号转义

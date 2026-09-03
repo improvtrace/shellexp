@@ -17,6 +17,17 @@ BIZ_ROOT="$ROOT/script/biz"
 
 die() { echo "main.sh: $1" >&2; exit "${2:-64}"; }
 
+# 转义描述文本中的 Tcl 特殊字符，避免破坏拼装出的 puts "..." 字符串
+tcl_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//\$/\\\$}"
+    s="${s//\[/\\\[}"
+    s="${s//\]/\\\]}"
+    printf '%s' "$s"
+}
+
 show_usage() {
     cat <<'USAGE'
 Usage:
@@ -126,6 +137,15 @@ done < <(grep -h '^# REQUIRE_ARGV:' "$auth_f" "$esc_f" "$biz_f" 2>/dev/null \
     | sed 's/^#[[:space:]]*REQUIRE_ARGV:[[:space:]]*//' \
     | awk '{n=$1; sub(/^[^[:space:]]*[[:space:]]*/, ""); print n "\t" $0}')
 
+# 可选环境变量（OPT_ENV 自描述，进 usage 展示，不做运行时必填校验）
+OPT_ENV_DESCS=()
+while IFS=$'\t' read -r name desc; do
+    [[ -z "$name" ]] && continue
+    OPT_ENV_DESCS+=("$(printf '%-16s %s (optional)' "$name" "$(tcl_escape "$desc")")")
+done < <(grep -h '^# OPT_ENV:' "$auth_f" "$esc_f" "$biz_f" 2>/dev/null \
+    | sed 's/^#[[:space:]]*OPT_ENV:[[:space:]]*//' \
+    | awk '{n=$1; sub(/^[^[:space:]]*[[:space:]]*/, ""); print n "\t" $0}')
+
 # ----------------------------------------------------------------
 # 组装 usage / argv 解析块（argv 位置全部由 REQUIRE_ARGV 声明, 从 0 号位起）
 # ----------------------------------------------------------------
@@ -140,7 +160,7 @@ for i in "${!ARGV_NAMES[@]}"; do
     printf -v line 'set %s [lindex $argv %d]' "$name" "$idx"
     argv_lines+="$line"$'\n'
     usage_params+=" <$name>"
-    param_descs+=("$(printf '%-12s %s' "$name" "$desc")")
+    param_descs+=("$(printf '%-12s %s' "$name" "$(tcl_escape "$desc")")")
     idx=$((idx + 1))
 done
 usage_params="${usage_params# }"
@@ -157,16 +177,16 @@ for v in $REQ_ENVS; do env_prefix+="${v}=... "; done
 env_descs=()
 for v in $REQ_ENVS; do
     case "$v" in
-        AUTH_PASS)     env_descs+=("AUTH_PASS        SSH/telnet login password (required)") ;;
-        ESCALATE_PASS) env_descs+=("ESCALATE_PASS    privilege escalation password (required; su: target user's password, sudo: current user's password)") ;;
-        NEW_PASS)      env_descs+=("NEW_PASS         new password (required)") ;;
-        *)             env_descs+=("$v") ;;
+        AUTH_PASS)     env_descs+=("$(printf '%-16s %s' "$v" "SSH/telnet login password (required)")") ;;
+        ESCALATE_PASS) env_descs+=("$(printf '%-16s %s' "$v" "privilege escalation password (required; su: target user's password, sudo: current user's password)")") ;;
+        NEW_PASS)      env_descs+=("$(printf '%-16s %s' "$v" "new password (required)")") ;;
+        *)             env_descs+=("$(printf '%-16s %s' "$v" "(required)")") ;;
     esac
 done
-if [[ "$BIZ" == "passwd" ]]; then
-    env_descs+=("OLD_PASS         current password (optional; required when the target user changes own password without privilege)")
-fi
-env_descs+=("TIMEOUT          expect timeout in seconds (optional, default 30)")
+env_descs+=("$(printf '%-16s %s' "TIMEOUT" "expect timeout in seconds (optional, default 30)")")
+for d in "${OPT_ENV_DESCS[@]}"; do
+    env_descs+=("$d")
+done
 
 desc_block=""
 for d in "${param_descs[@]}"; do
