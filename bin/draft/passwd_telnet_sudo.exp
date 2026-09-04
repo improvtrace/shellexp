@@ -1,9 +1,9 @@
 #!/usr/bin/expect
 # ============================================================
 # ShellExp 生成的 expect 脚本 —— 构建产物, 请勿手工编辑
-# 组合: auth=telnet escalate=none biz=chpasswd
-# 重新生成: ./main.sh --auth telnet --escalate none --biz chpasswd --out /home/administrator/projects/shellexp/bin/draft/telnet_none_chpasswd.exp
-# 生成时间: 2026-09-03 18:36:00
+# 组合: auth=telnet escalate=sudo biz=passwd
+# 重新生成: ./main.sh --auth telnet --escalate sudo --biz passwd --out /home/administrator/projects/shellexp/bin/draft/passwd_telnet_sudo.exp
+# 生成时间: 2026-09-04 13:58:39
 # ============================================================
 
 
@@ -15,7 +15,7 @@ if {[info exists env(TIMEOUT)]} { set timeout $env(TIMEOUT) }
 
 proc usage {} {
     global argv0
-    puts stderr "Usage: AUTH_PASS=... NEW_PASS=... $argv0 <host> <port> <auth_user> <target_user>"
+    puts stderr "Usage: AUTH_PASS=... ESCALATE_PASS=... NEW_PASS=... $argv0 <host> <port> <auth_user> <target_user>"
     puts stderr ""
     puts stderr "Positional args:"
     puts stderr "  host         target host address"
@@ -26,15 +26,17 @@ proc usage {} {
     puts stderr ""
     puts stderr "Environment variables:"
     puts stderr "  AUTH_PASS        SSH/telnet login password (required)"
+    puts stderr "  ESCALATE_PASS    privilege escalation password (required; su: target user's password, sudo: current user's password)"
     puts stderr "  NEW_PASS         new password (required)"
     puts stderr "  TIMEOUT          expect timeout in seconds (optional, default 30)"
     puts stderr "  PROXYCHAINS_CONF proxychains4 config file path (maintained by caller); when set, telnet runs wrapped as \"proxychains4 -q -f <conf> telnet\" (optional)"
+    puts stderr "  OLD_PASS         current password, required when the target user changes own password without privilege (optional)"
 
     exit 1
 }
 
 # 运行时校验: 缺少必需环境变量立即报错退出（凭据不进 argv, 防 ps 泄露）
-foreach _v {AUTH_PASS NEW_PASS} {
+foreach _v {AUTH_PASS ESCALATE_PASS NEW_PASS} {
     if {![info exists env($_v)]} {
         puts stderr "ERROR: missing required env var $_v"
         usage
@@ -146,43 +148,87 @@ expect {
 log_info "remote locale fixed to C"
 
 # ------------------------------------------------------------
-# 段2 提权 · none —— 空段：登录身份已满足业务权限
+# 段2 提权 · sudo —— sudo -S -i 提权为 root（输入的是当前登录用户的密码）
+# REQUIRE_ENV: ESCALATE_PASS
+# 前置: 已到达远端 shell 提示符（认证段完成）
+# 退出码: 7 提权失败 / 超时 / 会话中断
+# 注意: NOPASSWD 白名单场景无密码提示，直接命中提示符分支
 # ------------------------------------------------------------
 
+if {![info exists env(ESCALATE_PASS)]} { die 1 "missing env ESCALATE_PASS" }
+
+log_info "escalate: sudo -S -i"
+send "sudo -S -i\r"
+
+set _sudo_tries 0
+expect {
+    -re {not in the sudoers|sudo: 1 incorrect|[Ss]orry, try again|认证失败} {
+        puts stderr "ESCALATE_DENIED"
+        exit 7
+    }
+    -re {\[sudo\]\s*[Pp]assword|[Pp]assword\s*[:：]\s*$} {
+        if {[incr _sudo_tries] > 1} { puts stderr "ESCALATE_DENIED"; exit 7 }
+        log_info "sudo password prompt hit"
+        log_user 0
+        send -- "$env(ESCALATE_PASS)\r"
+        exp_continue
+    }
+    -re {[%#$>]\s*$} {
+        log_user 1
+        log_info "escalated to root via sudo"
+    }
+    timeout { puts stderr "ESCALATE_TIMEOUT"; exit 7 }
+    eof     { puts stderr "ESCALATE_EOF";     exit 7 }
+}
+
 # ------------------------------------------------------------
-# 段3 业务 · password/chpasswd —— 非交互改密（首选路线，调研 6.1 路线 A）
+# 段3 业务 · password/passwd —— 交互式 passwd 改密兜底（中英双语提示）
 # REQUIRE_ENV: NEW_PASS
 # REQUIRE_ARGV: target_user user whose password to change
-# 前置: 会话已具备 root 权限（直登 root 或经提权段）
-# 判定: 以退出码标记 BIZRC_<ts>=rc 判定成败，规避回显/语言/发行版差异（调研 3.3）
-# 退出码: 6 业务失败
+# OPT_ENV: OLD_PASS current password, required when the target user changes own password without privilege
+# 前置: 会话已具备 root 权限（直登 root 或经提权段），或为本人自改
+# 退出码: 6 业务失败（含策略拒绝熔断，最多 3 轮，调研 6.2）
+# 说明: send 直写 pty、不经远端 shell 解析，新密码无需单引号转义
 # ------------------------------------------------------------
 
 if {![info exists env(NEW_PASS)]} { die 1 "missing env NEW_PASS" }
 
-set _tu [quote_single $target_user]
-set _np [quote_single $env(NEW_PASS)]
-set _marker "BIZRC_[clock clicks]"
+log_info "biz: passwd for $target_user"
+send "passwd $target_user\r"
 
-log_info "biz: chpasswd for $target_user"
-# 命令行内嵌密码：先关回显再 send，防止密码进入屏幕/会话日志（调研 6.5）
-log_user 0
-send "echo '$_tu:$_np' | chpasswd; echo $_marker=\$?\r"
-
+set _retry 0
 expect {
-    -re "$_marker=(\[0-9\]+)" {
-        log_user 1
-        set _rc $expect_out(1,string)
-        if {$_rc == 0} {
-            log_info "biz: password changed for $target_user (rc=0)"
-        } else {
-            puts stderr "BIZ_FAIL: chpasswd rc=$_rc"
+    -re {(Current|当前的)\s*[Pp]assword\s*[:：]} {
+        if {![info exists env(OLD_PASS)]} {
+            puts stderr "BIZ_FAIL: prompted for current password but env OLD_PASS not set"
             exit 6
         }
+        log_user 0
+        send -- "$env(OLD_PASS)\r"
+        exp_continue
     }
+    -re {(New|新的|新增|输入新的)\s*[Pp]assword\s*[:：]} {
+        log_user 0
+        send -- "$env(NEW_PASS)\r"
+        exp_continue
+    }
+    -re {(Retype|重新输入|再次输入|确认).*[Pp]assword\s*[:：]} {
+        send -- "$env(NEW_PASS)\r"
+        exp_continue
+    }
+    -re {BAD PASSWORD|未通过|字典|过于简单|too similar|simplistic|dictionary word|is too short} {
+        if {[incr _retry] >= 3} {
+            puts stderr "BIZ_FAIL: password policy rejected after 3 attempts"
+            exit 6
+        }
+        exp_continue
+    }
+    -re {updated successfully|密码.*成功} { }
     timeout { log_user 1; puts stderr "BIZ_TIMEOUT"; exit 6 }
     eof     { log_user 1; puts stderr "BIZ_EOF";     exit 6 }
 }
+log_user 1
+log_info "biz: password changed for $target_user"
 
 
 # ------------------------------------------------------------

@@ -1,9 +1,9 @@
 #!/usr/bin/expect
 # ============================================================
 # ShellExp 生成的 expect 脚本 —— 构建产物, 请勿手工编辑
-# 组合: auth=telnet escalate=su biz=passwd
-# 重新生成: ./main.sh --auth telnet --escalate su --biz passwd --out /home/administrator/projects/shellexp/bin/draft/telnet_su_passwd.exp
-# 生成时间: 2026-09-03 18:36:00
+# 组合: auth=ssh escalate=su biz=discover_os
+# 重新生成: ./main.sh --auth ssh --escalate su --biz discover_os --out /home/administrator/projects/shellexp/bin/draft/discover_os_ssh_su.exp
+# 生成时间: 2026-09-04 13:58:39
 # ============================================================
 
 
@@ -15,41 +15,38 @@ if {[info exists env(TIMEOUT)]} { set timeout $env(TIMEOUT) }
 
 proc usage {} {
     global argv0
-    puts stderr "Usage: AUTH_PASS=... ESCALATE_PASS=... NEW_PASS=... $argv0 <host> <port> <auth_user> <escalate_user> <target_user>"
+    puts stderr "Usage: AUTH_PASS=... ESCALATE_PASS=... $argv0 <host> <port> <auth_user> <escalate_user>"
     puts stderr ""
     puts stderr "Positional args:"
     puts stderr "  host         target host address"
-    puts stderr "  port         telnet port (e.g. 23)"
-    puts stderr "  auth_user    login username"
+    puts stderr "  port         SSH port (e.g. 22)"
+    puts stderr "  auth_user    SSH login username"
     puts stderr "  escalate_user target user to su into"
-    puts stderr "  target_user  user whose password to change"
 
     puts stderr ""
     puts stderr "Environment variables:"
     puts stderr "  AUTH_PASS        SSH/telnet login password (required)"
     puts stderr "  ESCALATE_PASS    privilege escalation password (required; su: target user's password, sudo: current user's password)"
-    puts stderr "  NEW_PASS         new password (required)"
     puts stderr "  TIMEOUT          expect timeout in seconds (optional, default 30)"
-    puts stderr "  PROXYCHAINS_CONF proxychains4 config file path (maintained by caller); when set, telnet runs wrapped as \"proxychains4 -q -f <conf> telnet\" (optional)"
-    puts stderr "  OLD_PASS         current password, required when the target user changes own password without privilege (optional)"
+    puts stderr "  PROXY_COMMAND    complete ProxyCommand string (e.g. \"nc -X connect -x proxy:8080 %h %p\"); framework injects it verbatim as \"-o ProxyCommand=...\" (optional)"
+    puts stderr "  SSH_KEEPALIVE    ServerAliveInterval seconds (proxy only, default 30, 0 disables) (optional)"
 
     exit 1
 }
 
 # 运行时校验: 缺少必需环境变量立即报错退出（凭据不进 argv, 防 ps 泄露）
-foreach _v {AUTH_PASS ESCALATE_PASS NEW_PASS} {
+foreach _v {AUTH_PASS ESCALATE_PASS} {
     if {![info exists env($_v)]} {
         puts stderr "ERROR: missing required env var $_v"
         usage
     }
 }
 
-if {$argc != 5} { usage }
+if {$argc != 4} { usage }
 set host [lindex $argv 0]
 set port [lindex $argv 1]
 set auth_user [lindex $argv 2]
 set escalate_user [lindex $argv 3]
-set target_user [lindex $argv 4]
 
 
 
@@ -79,54 +76,63 @@ proc quote_single {s} {
 }
 
 # ------------------------------------------------------------
-# 段1 认证 · telnet —— Telnet 密码登录（全脚本唯一 spawn 点）
+# 段1 认证 · ssh —— SSH 密码登录（全脚本唯一 spawn 点）
 # REQUIRE_ENV: AUTH_PASS
 # REQUIRE_ARGV: host target host address
-# REQUIRE_ARGV: port telnet port (e.g. 23)
-# REQUIRE_ARGV: auth_user login username
-# OPT_ENV: PROXYCHAINS_CONF proxychains4 config file path (maintained by caller); when set, telnet runs wrapped as "proxychains4 -q -f <conf> telnet"
+# REQUIRE_ARGV: port SSH port (e.g. 22)
+# REQUIRE_ARGV: auth_user SSH login username
+# OPT_ENV: PROXY_COMMAND complete ProxyCommand string (e.g. "nc -X connect -x proxy:8080 %h %p"); framework injects it verbatim as "-o ProxyCommand=..."
+# OPT_ENV: SSH_KEEPALIVE ServerAliveInterval seconds (proxy only, default 30, 0 disables)
 # 前置: 无
 # 后置: 已到达远端 shell 提示符（locale 固定由公共帧完成，见 main.sh 段1.5）
 # 退出码: 2 认证失败 / 连接不可达 / 超时 / 会话中断
-# 安全警告: Telnet 明文传输凭据，仅限独立管理网/带外网使用（调研 5.4）
-# 过代理说明: 框架仅提供 proxychains4 包裹能力，配置文件由调用者自行生成维护（内容零认知）；
-#            proxychains4 对 telnet 的要求见 README「过代理连接」
 # ------------------------------------------------------------
+# 模式说明（调研 11.4 实测坑位）：
+#   - 用 [Pp] 字符类而非 (?i)，规避 Expect gate keeper 优化导致大写 P 永不匹配
+#   - 提示符/密码提示均锚定行尾 \s*$，避免误匹配命令回显
+# 过代理说明（详见 README「过代理连接」，均为建议，框架不解析 PROXY_COMMAND 内容）：
+#   - PROXY_COMMAND 存在且非空时注入 -o ProxyCommand；telnet 不支持过代理
+#   - 过代理易被空闲切断（调研坑点 3），默认 ServerAliveInterval=30，SSH_KEEPALIVE 可覆盖（0=关闭）
 
 if {![info exists env(AUTH_PASS)]} { die 1 "missing env AUTH_PASS" }
 
-if {[info exists env(PROXYCHAINS_CONF)] && $env(PROXYCHAINS_CONF) ne ""} {
-    log_info "spawn proxychains4 -q -f $env(PROXYCHAINS_CONF) telnet $host $port"
-    spawn proxychains4 -q -f $env(PROXYCHAINS_CONF) telnet $host $port
-} else {
-    log_info "spawn telnet $host $port (direct)"
-    spawn telnet $host $port
+set _ssh_opts [list -p $port -o ConnectTimeout=10]
+set _proxy 0
+if {[info exists env(PROXY_COMMAND)] && $env(PROXY_COMMAND) ne ""} {
+    set _proxy 1
+    lappend _ssh_opts -o "ProxyCommand=$env(PROXY_COMMAND)"
+    set _ka 30
+    if {[info exists env(SSH_KEEPALIVE)]} { set _ka $env(SSH_KEEPALIVE) }
+    lappend _ssh_opts -o "ServerAliveInterval=$_ka"
 }
+if {$_proxy} {
+    log_info "spawn ssh -p $port $auth_user@$host (via ProxyCommand)"
+} else {
+    log_info "spawn ssh -p $port $auth_user@$host (direct)"
+}
+spawn {*}[concat [list ssh] $_ssh_opts [list $auth_user@$host]]
 
-set _login_tries 0
-set _pass_tries 0
+set _auth_tries 0
 expect {
-    -re {Connection refused|Unable to connect|No route to host|Network is unreachable|Connection timed out|Connection closed by foreign host} {
+    -re {[Pp]ermission [Dd]enied|Host key verification failed} {
+        puts stderr "AUTH_DENIED"
+        exit 2
+    }
+    -re {Connection (refused|timed out|reset|closed)|No route to host|Network is unreachable} {
         puts stderr "AUTH_UNREACHABLE"
         exit 2
     }
-    -re {(Login|Username|login)\s*[:：]\s*$} {
-        # 登录名提示反复出现视为认证失败（单次失败即退出，防锁定）
-        if {[incr _login_tries] > 1} { puts stderr "AUTH_DENIED"; exit 2 }
-        log_info "login prompt hit, sending auth_user"
-        send -- "$auth_user\r"
+    -re {yes/no} {
+        send "yes\r"
         exp_continue
     }
     -re {[Pp]assword\s*[:：]\s*$} {
-        if {[incr _pass_tries] > 1} { puts stderr "AUTH_DENIED"; exit 2 }
+        # 单次失败即退出，防止连续错密触发账号锁定（调研 6.1 场景 E）
+        if {[incr _auth_tries] > 1} { puts stderr "AUTH_DENIED"; exit 2 }
         log_info "password prompt hit, sending AUTH_PASS"
         log_user 0
         send -- "$env(AUTH_PASS)\r"
         exp_continue
-    }
-    -re {Login incorrect|认证失败} {
-        puts stderr "AUTH_DENIED"
-        exit 2
     }
     -re {[%#$>]\s*$} {
         log_user 1
@@ -185,53 +191,48 @@ expect {
 }
 
 # ------------------------------------------------------------
-# 段3 业务 · password/passwd —— 交互式 passwd 改密兜底（中英双语提示）
-# REQUIRE_ENV: NEW_PASS
-# REQUIRE_ARGV: target_user user whose password to change
-# OPT_ENV: OLD_PASS current password, required when the target user changes own password without privilege
-# 前置: 会话已具备 root 权限（直登 root 或经提权段），或为本人自改
-# 退出码: 6 业务失败（含策略拒绝熔断，最多 3 轮，调研 6.2）
-# 说明: send 直写 pty、不经远端 shell 解析，新密码无需单引号转义
+# 段3 业务 · discover_os —— 探测远端资产类型（OS 家族/内核/发行版/改密能力）
+# 前置: 已到达远端 POSIX shell 提示符（认证/提权段完成）
+# 输出: stdout 单行结构化结果
+#       DISCOVER os=<os> kernel=<ver> id=<distro> chpasswd=<yes|no>
+# 说明: 全部探测只读；id 依赖 /etc/os-release，AIX/Solaris 等无该文件则为 "-"
+# 退出码: 6 业务失败
 # ------------------------------------------------------------
 
-if {![info exists env(NEW_PASS)]} { die 1 "missing env NEW_PASS" }
+log_info "biz: discovering remote asset type"
+# 注意: Tcl 正则默认非 multiline, `^` 只锚定缓冲区开头; 用 `\r?\n` 前缀锚定规避
+# 命令回显误判（调研 3.3）。行尾用后瞻 (?=\r?\n) 而非直接消费换行符,
+# 否则上一模式吃掉换行后, 下一行失去前导锚点（exp_continue 连续匹配场景）。
+send "echo DISC_BEGIN; uname -s; uname -r; awk -F= '/^ID=/{print \"ID=\" \$2; exit}' /etc/os-release 2>/dev/null; command -v chpasswd >/dev/null 2>&1 && echo HAS_CHPASSWD=1 || echo HAS_CHPASSWD=0; echo DISC_END\r"
 
-log_info "biz: passwd for $target_user"
-send "passwd $target_user\r"
-
-set _retry 0
+set _os "-"
+set _kernel "-"
+set _id "-"
+set _chpwd "-"
 expect {
-    -re {(Current|当前的)\s*[Pp]assword\s*[:：]} {
-        if {![info exists env(OLD_PASS)]} {
-            puts stderr "BIZ_FAIL: prompted for current password but env OLD_PASS not set"
-            exit 6
-        }
-        log_user 0
-        send -- "$env(OLD_PASS)\r"
+    -re {\r?\n(Linux|AIX|SunOS|FreeBSD|OpenBSD|NetBSD|Darwin|HP-UX)(?=\r?\n)} {
+        set _os $expect_out(1,string)
         exp_continue
     }
-    -re {(New|新的|新增|输入新的)\s*[Pp]assword\s*[:：]} {
-        log_user 0
-        send -- "$env(NEW_PASS)\r"
+    -re {\r?\n([0-9][^\r\n]*)(?=\r?\n)} {
+        set _kernel $expect_out(1,string)
         exp_continue
     }
-    -re {(Retype|重新输入|再次输入|确认).*[Pp]assword\s*[:：]} {
-        send -- "$env(NEW_PASS)\r"
+    -re {\r?\nID=([^\r\n]*)(?=\r?\n)} {
+        if {[string length $expect_out(1,string)] > 0} { set _id $expect_out(1,string) }
         exp_continue
     }
-    -re {BAD PASSWORD|未通过|字典|过于简单|too similar|simplistic|dictionary word|is too short} {
-        if {[incr _retry] >= 3} {
-            puts stderr "BIZ_FAIL: password policy rejected after 3 attempts"
-            exit 6
-        }
+    -re {\r?\nHAS_CHPASSWD=([01])(?=\r?\n)} {
+        set _chpwd [expr {$expect_out(1,string) eq "1" ? "yes" : "no"}]
         exp_continue
     }
-    -re {updated successfully|密码.*成功} { }
-    timeout { log_user 1; puts stderr "BIZ_TIMEOUT"; exit 6 }
-    eof     { log_user 1; puts stderr "BIZ_EOF";     exit 6 }
+    -re {\r?\nDISC_END(?=\r?\n)} { }
+    timeout { puts stderr "BIZ_TIMEOUT"; exit 6 }
+    eof     { puts stderr "BIZ_EOF";     exit 6 }
 }
-log_user 1
-log_info "biz: password changed for $target_user"
+
+puts "DISCOVER os=$_os kernel=$_kernel id=$_id chpasswd=$_chpwd"
+log_info "biz: discover done: os=$_os kernel=$_kernel id=$_id chpasswd=$_chpwd"
 
 
 # ------------------------------------------------------------

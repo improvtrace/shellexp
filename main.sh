@@ -35,7 +35,7 @@ Usage:
       --auth <name>      auth segment:     script/biz/auth/auth_<name>.tpl (ssh/telnet)
       --escalate <name>  escalate segment: script/biz/escalate/escalate_<name>.tpl (none/su/sudo)
       --biz <name>       biz segment:      unique <name>.tpl under script/biz/ category dirs
-      --out <file>       output path (optional; default bin/draft/<auth>_<escalate>_<biz>.exp)
+      --out <file>       output path (optional; default bin/draft/<biz>_<auth>_<escalate>.exp)
 
   ./main.sh --list       list available segment templates
   ./main.sh --help       show this help
@@ -47,9 +47,9 @@ bin/ directory layout:
 
 Example:
   ./main.sh --auth ssh --escalate sudo --biz chpasswd
-      # -> bin/draft/ssh_sudo_chpasswd.exp
+      # -> bin/draft/chpasswd_ssh_sudo.exp
   AUTH_PASS='loginpass' ESCALATE_PASS='sudopass' NEW_PASS='newpass' \
-      ./bin/draft/ssh_sudo_chpasswd.exp <host> <port> <auth_user> <target_user>
+      ./bin/draft/chpasswd_ssh_sudo.exp <host> <port> <auth_user> <target_user>
 USAGE
 }
 
@@ -88,9 +88,9 @@ done
 [[ -n "$ESCALATE" ]] || die "missing --escalate" 64
 [[ -n "$BIZ"      ]] || die "missing --biz" 64
 
-# --out 可选: 缺省输出到 bin/draft/<auth>_<escalate>_<biz>.exp（基于脚本自身路径定位）
+# --out 可选: 缺省输出到 bin/draft/<biz>_<auth>_<escalate>.exp（基于脚本自身路径定位）
 if [[ -z "$OUT" ]]; then
-    OUT="$ROOT/bin/draft/${AUTH}_${ESCALATE}_${BIZ}.exp"
+    OUT="$ROOT/bin/draft/${BIZ}_${AUTH}_${ESCALATE}.exp"
 fi
 
 # 防护: 禁止生成器写入人工归档区（bin/release、bin/manual 由用户手工管理）

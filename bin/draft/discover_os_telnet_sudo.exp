@@ -1,9 +1,9 @@
 #!/usr/bin/expect
 # ============================================================
 # ShellExp 生成的 expect 脚本 —— 构建产物, 请勿手工编辑
-# 组合: auth=telnet escalate=su biz=discover_os
-# 重新生成: ./main.sh --auth telnet --escalate su --biz discover_os --out /home/administrator/projects/shellexp/bin/draft/telnet_su_discover_os.exp
-# 生成时间: 2026-09-03 18:36:00
+# 组合: auth=telnet escalate=sudo biz=discover_os
+# 重新生成: ./main.sh --auth telnet --escalate sudo --biz discover_os --out /home/administrator/projects/shellexp/bin/draft/discover_os_telnet_sudo.exp
+# 生成时间: 2026-09-04 13:58:39
 # ============================================================
 
 
@@ -15,13 +15,12 @@ if {[info exists env(TIMEOUT)]} { set timeout $env(TIMEOUT) }
 
 proc usage {} {
     global argv0
-    puts stderr "Usage: AUTH_PASS=... ESCALATE_PASS=... $argv0 <host> <port> <auth_user> <escalate_user>"
+    puts stderr "Usage: AUTH_PASS=... ESCALATE_PASS=... $argv0 <host> <port> <auth_user>"
     puts stderr ""
     puts stderr "Positional args:"
     puts stderr "  host         target host address"
     puts stderr "  port         telnet port (e.g. 23)"
     puts stderr "  auth_user    login username"
-    puts stderr "  escalate_user target user to su into"
 
     puts stderr ""
     puts stderr "Environment variables:"
@@ -41,11 +40,10 @@ foreach _v {AUTH_PASS ESCALATE_PASS} {
     }
 }
 
-if {$argc != 4} { usage }
+if {$argc != 3} { usage }
 set host [lindex $argv 0]
 set port [lindex $argv 1]
 set auth_user [lindex $argv 2]
-set escalate_user [lindex $argv 3]
 
 
 
@@ -146,35 +144,34 @@ expect {
 log_info "remote locale fixed to C"
 
 # ------------------------------------------------------------
-# 段2 提权 · su —— su - 切换目标身份（输入的是目标身份的密码）
+# 段2 提权 · sudo —— sudo -S -i 提权为 root（输入的是当前登录用户的密码）
 # REQUIRE_ENV: ESCALATE_PASS
-# REQUIRE_ARGV: escalate_user target user to su into
 # 前置: 已到达远端 shell 提示符（认证段完成）
 # 退出码: 7 提权失败 / 超时 / 会话中断
-# 注意: root 登录时 su 到普通用户无需密码，直接命中提示符分支
+# 注意: NOPASSWD 白名单场景无密码提示，直接命中提示符分支
 # ------------------------------------------------------------
 
 if {![info exists env(ESCALATE_PASS)]} { die 1 "missing env ESCALATE_PASS" }
 
-log_info "escalate: su - $escalate_user"
-send "su - $escalate_user\r"
+log_info "escalate: sudo -S -i"
+send "sudo -S -i\r"
 
-set _su_tries 0
+set _sudo_tries 0
 expect {
-    -re {su: [Aa]uthentication [Ff]ailure|su: [Ss]orry|[Ii]ncorrect [Pp]assword|认证失败|Unknown id|does not exist|no passwd entry} {
+    -re {not in the sudoers|sudo: 1 incorrect|[Ss]orry, try again|认证失败} {
         puts stderr "ESCALATE_DENIED"
         exit 7
     }
-    -re {[Pp]assword\s*[:：]\s*$} {
-        if {[incr _su_tries] > 1} { puts stderr "ESCALATE_DENIED"; exit 7 }
-        log_info "su password prompt hit"
+    -re {\[sudo\]\s*[Pp]assword|[Pp]assword\s*[:：]\s*$} {
+        if {[incr _sudo_tries] > 1} { puts stderr "ESCALATE_DENIED"; exit 7 }
+        log_info "sudo password prompt hit"
         log_user 0
         send -- "$env(ESCALATE_PASS)\r"
         exp_continue
     }
     -re {[%#$>]\s*$} {
         log_user 1
-        log_info "escalated to $escalate_user via su"
+        log_info "escalated to root via sudo"
     }
     timeout { puts stderr "ESCALATE_TIMEOUT"; exit 7 }
     eof     { puts stderr "ESCALATE_EOF";     exit 7 }

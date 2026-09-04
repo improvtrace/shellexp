@@ -1,9 +1,9 @@
 #!/usr/bin/expect
 # ============================================================
 # ShellExp 生成的 expect 脚本 —— 构建产物, 请勿手工编辑
-# 组合: auth=telnet escalate=sudo biz=chpasswd
-# 重新生成: ./main.sh --auth telnet --escalate sudo --biz chpasswd --out /home/administrator/projects/shellexp/bin/draft/telnet_sudo_chpasswd.exp
-# 生成时间: 2026-09-03 18:36:00
+# 组合: auth=ssh escalate=sudo biz=chpasswd
+# 重新生成: ./main.sh --auth ssh --escalate sudo --biz chpasswd --out /home/administrator/projects/shellexp/bin/draft/chpasswd_ssh_sudo.exp
+# 生成时间: 2026-09-04 13:58:39
 # ============================================================
 
 
@@ -19,8 +19,8 @@ proc usage {} {
     puts stderr ""
     puts stderr "Positional args:"
     puts stderr "  host         target host address"
-    puts stderr "  port         telnet port (e.g. 23)"
-    puts stderr "  auth_user    login username"
+    puts stderr "  port         SSH port (e.g. 22)"
+    puts stderr "  auth_user    SSH login username"
     puts stderr "  target_user  user whose password to change"
 
     puts stderr ""
@@ -29,7 +29,8 @@ proc usage {} {
     puts stderr "  ESCALATE_PASS    privilege escalation password (required; su: target user's password, sudo: current user's password)"
     puts stderr "  NEW_PASS         new password (required)"
     puts stderr "  TIMEOUT          expect timeout in seconds (optional, default 30)"
-    puts stderr "  PROXYCHAINS_CONF proxychains4 config file path (maintained by caller); when set, telnet runs wrapped as \"proxychains4 -q -f <conf> telnet\" (optional)"
+    puts stderr "  PROXY_COMMAND    complete ProxyCommand string (e.g. \"nc -X connect -x proxy:8080 %h %p\"); framework injects it verbatim as \"-o ProxyCommand=...\" (optional)"
+    puts stderr "  SSH_KEEPALIVE    ServerAliveInterval seconds (proxy only, default 30, 0 disables) (optional)"
 
     exit 1
 }
@@ -76,54 +77,63 @@ proc quote_single {s} {
 }
 
 # ------------------------------------------------------------
-# 段1 认证 · telnet —— Telnet 密码登录（全脚本唯一 spawn 点）
+# 段1 认证 · ssh —— SSH 密码登录（全脚本唯一 spawn 点）
 # REQUIRE_ENV: AUTH_PASS
 # REQUIRE_ARGV: host target host address
-# REQUIRE_ARGV: port telnet port (e.g. 23)
-# REQUIRE_ARGV: auth_user login username
-# OPT_ENV: PROXYCHAINS_CONF proxychains4 config file path (maintained by caller); when set, telnet runs wrapped as "proxychains4 -q -f <conf> telnet"
+# REQUIRE_ARGV: port SSH port (e.g. 22)
+# REQUIRE_ARGV: auth_user SSH login username
+# OPT_ENV: PROXY_COMMAND complete ProxyCommand string (e.g. "nc -X connect -x proxy:8080 %h %p"); framework injects it verbatim as "-o ProxyCommand=..."
+# OPT_ENV: SSH_KEEPALIVE ServerAliveInterval seconds (proxy only, default 30, 0 disables)
 # 前置: 无
 # 后置: 已到达远端 shell 提示符（locale 固定由公共帧完成，见 main.sh 段1.5）
 # 退出码: 2 认证失败 / 连接不可达 / 超时 / 会话中断
-# 安全警告: Telnet 明文传输凭据，仅限独立管理网/带外网使用（调研 5.4）
-# 过代理说明: 框架仅提供 proxychains4 包裹能力，配置文件由调用者自行生成维护（内容零认知）；
-#            proxychains4 对 telnet 的要求见 README「过代理连接」
 # ------------------------------------------------------------
+# 模式说明（调研 11.4 实测坑位）：
+#   - 用 [Pp] 字符类而非 (?i)，规避 Expect gate keeper 优化导致大写 P 永不匹配
+#   - 提示符/密码提示均锚定行尾 \s*$，避免误匹配命令回显
+# 过代理说明（详见 README「过代理连接」，均为建议，框架不解析 PROXY_COMMAND 内容）：
+#   - PROXY_COMMAND 存在且非空时注入 -o ProxyCommand；telnet 不支持过代理
+#   - 过代理易被空闲切断（调研坑点 3），默认 ServerAliveInterval=30，SSH_KEEPALIVE 可覆盖（0=关闭）
 
 if {![info exists env(AUTH_PASS)]} { die 1 "missing env AUTH_PASS" }
 
-if {[info exists env(PROXYCHAINS_CONF)] && $env(PROXYCHAINS_CONF) ne ""} {
-    log_info "spawn proxychains4 -q -f $env(PROXYCHAINS_CONF) telnet $host $port"
-    spawn proxychains4 -q -f $env(PROXYCHAINS_CONF) telnet $host $port
-} else {
-    log_info "spawn telnet $host $port (direct)"
-    spawn telnet $host $port
+set _ssh_opts [list -p $port -o ConnectTimeout=10]
+set _proxy 0
+if {[info exists env(PROXY_COMMAND)] && $env(PROXY_COMMAND) ne ""} {
+    set _proxy 1
+    lappend _ssh_opts -o "ProxyCommand=$env(PROXY_COMMAND)"
+    set _ka 30
+    if {[info exists env(SSH_KEEPALIVE)]} { set _ka $env(SSH_KEEPALIVE) }
+    lappend _ssh_opts -o "ServerAliveInterval=$_ka"
 }
+if {$_proxy} {
+    log_info "spawn ssh -p $port $auth_user@$host (via ProxyCommand)"
+} else {
+    log_info "spawn ssh -p $port $auth_user@$host (direct)"
+}
+spawn {*}[concat [list ssh] $_ssh_opts [list $auth_user@$host]]
 
-set _login_tries 0
-set _pass_tries 0
+set _auth_tries 0
 expect {
-    -re {Connection refused|Unable to connect|No route to host|Network is unreachable|Connection timed out|Connection closed by foreign host} {
+    -re {[Pp]ermission [Dd]enied|Host key verification failed} {
+        puts stderr "AUTH_DENIED"
+        exit 2
+    }
+    -re {Connection (refused|timed out|reset|closed)|No route to host|Network is unreachable} {
         puts stderr "AUTH_UNREACHABLE"
         exit 2
     }
-    -re {(Login|Username|login)\s*[:：]\s*$} {
-        # 登录名提示反复出现视为认证失败（单次失败即退出，防锁定）
-        if {[incr _login_tries] > 1} { puts stderr "AUTH_DENIED"; exit 2 }
-        log_info "login prompt hit, sending auth_user"
-        send -- "$auth_user\r"
+    -re {yes/no} {
+        send "yes\r"
         exp_continue
     }
     -re {[Pp]assword\s*[:：]\s*$} {
-        if {[incr _pass_tries] > 1} { puts stderr "AUTH_DENIED"; exit 2 }
+        # 单次失败即退出，防止连续错密触发账号锁定（调研 6.1 场景 E）
+        if {[incr _auth_tries] > 1} { puts stderr "AUTH_DENIED"; exit 2 }
         log_info "password prompt hit, sending AUTH_PASS"
         log_user 0
         send -- "$env(AUTH_PASS)\r"
         exp_continue
-    }
-    -re {Login incorrect|认证失败} {
-        puts stderr "AUTH_DENIED"
-        exit 2
     }
     -re {[%#$>]\s*$} {
         log_user 1

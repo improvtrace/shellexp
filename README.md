@@ -58,18 +58,18 @@ sudo apt-get install -y expect tcl
 # 3. 生成脚本：spider 登录 → sudo 提权 → 非交互改密（缺省输出 bin/draft/）
 ./main.sh --auth ssh --escalate sudo --biz chpasswd
 #   等价于: ./main.sh --auth ssh --escalate sudo --biz chpasswd \
-#               --out bin/draft/ssh_sudo_chpasswd.exp
+#               --out bin/draft/chpasswd_ssh_sudo.exp
 
 # 4. 运行
 AUTH_PASS='登录密码' ESCALATE_PASS='sudo密码' NEW_PASS='新密码' \
-    ./bin/draft/ssh_sudo_chpasswd.exp 10.0.0.1 22 spider targetuser
+    ./bin/draft/chpasswd_ssh_sudo.exp 10.0.0.1 22 spider targetuser
 
 # 5. 资产类型探测（登录后只读采集，结果输出到 stdout）
-AUTH_PASS='登录密码' ./bin/draft/ssh_none_discover_os.exp 10.0.0.1 22 spider
+AUTH_PASS='登录密码' ./bin/draft/discover_os_ssh_none.exp 10.0.0.1 22 spider
 # DISCOVER os=Linux kernel=5.15.0-73-generic id=ubuntu chpasswd=yes
 
 # 6. 适配调试通过后，手动归档到 release/
-mv bin/draft/ssh_sudo_chpasswd.exp bin/release/
+mv bin/draft/chpasswd_ssh_sudo.exp bin/release/
 ```
 
 ## 环境变量契约
@@ -102,11 +102,11 @@ mv bin/draft/ssh_sudo_chpasswd.exp bin/release/
 
 ```bash
 # 直连（默认，未设置 PROXY_COMMAND）
-AUTH_PASS=... ./bin/draft/ssh_none_chpasswd.exp host 22 root bob
+AUTH_PASS=... ./bin/draft/chpasswd_ssh_none.exp host 22 root bob
 
 # 过代理：PROXY_COMMAND 中的 %h/%p 由 ssh 自动展开为目标主机/端口
 export PROXY_COMMAND="nc -X connect -x proxy.corp:8080 %h %p"
-AUTH_PASS=... ./bin/draft/ssh_none_chpasswd.exp host 22 root bob
+AUTH_PASS=... ./bin/draft/chpasswd_ssh_none.exp host 22 root bob
 ```
 
 **变量传递**：目标地址用 ssh 原生 token `%h` / `%p`（ssh 自动展开）；自有参数（代理地址等）在 `export` 时由 shell 展开；框架只原样透传，不解析、不转义、不做占位符替换。
@@ -133,11 +133,11 @@ AUTH_PASS=... ./bin/draft/ssh_none_chpasswd.exp host 22 root bob
 
 ```bash
 # 直连（默认）
-AUTH_PASS=... ./bin/draft/telnet_none_chpasswd.exp host 23 root bob
+AUTH_PASS=... ./bin/draft/chpasswd_telnet_none.exp host 23 root bob
 
 # 过代理：PROXYCHAINS_CONF 指向调用者自行维护的配置文件
 export PROXYCHAINS_CONF=/etc/proxychains.d/1a2b3c4d.conf
-AUTH_PASS=... ./bin/draft/telnet_none_chpasswd.exp host 23 root bob
+AUTH_PASS=... ./bin/draft/chpasswd_telnet_none.exp host 23 root bob
 ```
 
 - **配置文件由调用者自行维护**：命名与存放（如按代理信息 hash 生成文件名、置于 `/etc/proxychains.d/`）及内容均为调用者职责，框架零认知
